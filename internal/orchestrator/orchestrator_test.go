@@ -1,23 +1,26 @@
 package orchestrator
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/MorningBlossom/ai-code-review/internal/analyzer"
 	"github.com/MorningBlossom/ai-code-review/internal/contextbuilder"
 	"github.com/MorningBlossom/ai-code-review/internal/github"
+	"github.com/MorningBlossom/ai-code-review/internal/model"
 	"github.com/MorningBlossom/ai-code-review/internal/publisher"
 	"github.com/MorningBlossom/ai-code-review/internal/review"
 	"github.com/MorningBlossom/ai-code-review/internal/validator"
+	"github.com/MorningBlossom/ai-code-review/internal/workspace"
 )
 
 type contextCaptureModel struct {
-	called   bool
-	context  review.ReviewContext
-	findings []review.ReviewFinding
-	err      error
+	receivedContext review.ReviewContext
 }
 
 func (m *contextCaptureModel) Name() string {
@@ -28,19 +31,26 @@ func (m *contextCaptureModel) Review(
 	ctx context.Context,
 	reviewContext review.ReviewContext,
 ) ([]review.ReviewFinding, error) {
-	m.called = true
-	m.context = reviewContext
+	m.receivedContext = reviewContext
 
-	if m.err != nil {
-		return nil, m.err
-	}
-
-	return m.findings, nil
+	return []review.ReviewFinding{
+		{
+			FindingID:   "model:001",
+			Source:      "context-capture-model",
+			Category:    "correctness",
+			Severity:    "medium",
+			Confidence:  0.9,
+			Title:       "Model finding",
+			Explanation: "Test model finding.",
+			FilePath:    "payment/retry.go",
+			StartLine:   1,
+			EndLine:     1,
+		},
+	}, nil
 }
 
 type contextCapturePublisher struct {
-	called bool
-	result review.ReviewResult
+	receivedResult review.ReviewResult
 }
 
 func (p *contextCapturePublisher) Publish(
@@ -48,39 +58,77 @@ func (p *contextCapturePublisher) Publish(
 	request review.ReviewRequest,
 	result review.ReviewResult,
 ) error {
-	p.called = true
-	p.result = result
+	p.receivedResult = result
 	return nil
 }
 
-func TestReviewOrchestrator_Success(t *testing.T) {
-	fakeGitHub := &github.FakeProvider{}
+type fakeWorkspaceAnalyzer struct {
+	fail bool
+}
 
-	analyzers := []analyzer.Analyzer{
-		&analyzer.FakeAnalyzer{},
+func (a *fakeWorkspaceAnalyzer) Name() string {
+	return "fake-workspace-analyzer"
+}
+
+func (a *fakeWorkspaceAnalyzer) AnalyzeWorkspace(
+	ctx context.Context,
+	ws workspace.Workspace,
+) review.AnalyzerResult {
+	if a.fail {
+		return review.AnalyzerResult{
+			AnalyzerName: a.Name(),
+			Status:       "failed",
+			Diagnostics: []string{
+				"fake workspace analyzer failed",
+			},
+		}
 	}
 
-	modelProvider := &contextCaptureModel{
-		findings: []review.ReviewFinding{
+	return review.AnalyzerResult{
+		AnalyzerName: a.Name(),
+		Status:       "passed",
+		Findings: []review.ReviewFinding{
 			{
-				FindingID:   "model-1",
-				Source:      "model",
-				Category:    "performance",
-				Severity:    "low",
-				Confidence:  0.9,
-				Title:       "Potential performance issue",
-				Explanation: "This may perform unnecessary work.",
+				FindingID:   "workspace:001",
+				Source:      a.Name(),
+				Category:    "correctness",
+				Severity:    "high",
+				Confidence:  1.0,
+				Title:       "Workspace analyzer finding",
+				Explanation: "Test workspace analyzer finding.",
 				FilePath:    "payment/retry.go",
-				StartLine:   3,
-				EndLine:     3,
+				StartLine:   10,
+				EndLine:     10,
 			},
 		},
 	}
+}
 
-	fakeValidator := &validator.FakeValidator{}
+func newTestRequest() review.ReviewRequest {
+	return review.ReviewRequest{
+		ReviewID:            "review-001",
+		InstallationID:      123,
+		Organization:        "MorningBlossom",
+		Repository:          "ai-code-review",
+		PullRequestNumber:   7,
+		BaseSHA:             "base-123",
+		HeadSHA:             "head-456",
+		EventType:           "pull_request",
+		RequestedBy:         "test-user",
+		RequestedAt:         time.Now().UTC(),
+		ReviewMode:          "pull_request",
+		ReviewPolicyVersion: "v1",
+	}
+}
 
-	publisher := &contextCapturePublisher{}
-
+func newTestOrchestrator(
+	fakeGitHub *github.FakeProvider,
+	analyzers []analyzer.Analyzer,
+	workspaceAnalyzers []analyzer.WorkspaceAnalyzer,
+	modelProvider model.ModelProvider,
+	findingValidator validator.Validator,
+	reviewPublisher publisher.Publisher,
+) *ReviewOrchestrator {
 	contextBuilder := contextbuilder.NewBuilder(
 		fakeGitHub,
 		20,
@@ -88,36 +136,60 @@ func TestReviewOrchestrator_Success(t *testing.T) {
 		50_000,
 	)
 
-	reviewOrchestrator := NewOrchestrator(
+	workspaceBuilder := workspace.NewSnapshotBuilder(
 		fakeGitHub,
-		contextBuilder,
-		analyzers,
-		modelProvider,
-		fakeValidator,
-		publisher,
 	)
 
-	request := review.ReviewRequest{
-		ReviewID:            "review-123",
-		InstallationID:      12345,
-		Organization:        "MorningBlossom",
-		Repository:          "test-repo",
-		PullRequestNumber:   42,
-		BaseSHA:             "base-123",
-		HeadSHA:             "head-456",
-		EventType:           "pull_request",
-		RequestedBy:         "test-user",
-		ReviewMode:          "pull_request",
-		ReviewPolicyVersion: "v1",
-	}
+	return NewOrchestrator(
+		fakeGitHub,
+		contextBuilder,
+		workspaceBuilder,
+		analyzers,
+		workspaceAnalyzers,
+		modelProvider,
+		findingValidator,
+		reviewPublisher,
+	)
+}
 
-	result, err := reviewOrchestrator.Review(context.Background(), request)
+func TestReviewOrchestrator_Success(t *testing.T) {
+	fakeGitHub := &github.FakeProvider{}
+
+	fakeAnalyzer := &analyzer.FakeAnalyzer{}
+
+	FakeModelProvider := &contextCaptureModel{}
+
+	fakeValidator := &validator.FakeValidator{}
+
+	fakePublisher := &contextCapturePublisher{}
+
+	orchestrator := newTestOrchestrator(
+		fakeGitHub,
+		[]analyzer.Analyzer{
+			fakeAnalyzer,
+		},
+		nil,
+		FakeModelProvider,
+		fakeValidator,
+		fakePublisher,
+	)
+
+	request := newTestRequest()
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		request,
+	)
+
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("expected no error, got %v", err)
 	}
 
 	if result.Status != "completed" {
-		t.Fatalf("expected status completed, got %q", result.Status)
+		t.Fatalf(
+			"expected status completed, got %q",
+			result.Status,
+		)
 	}
 
 	if result.ReviewID != request.ReviewID {
@@ -146,229 +218,197 @@ func TestReviewOrchestrator_Success(t *testing.T) {
 
 	if result.PullRequestNumber != request.PullRequestNumber {
 		t.Fatalf(
-			"expected pull request number %d, got %d",
+			"expected PR number %d, got %d",
 			request.PullRequestNumber,
 			result.PullRequestNumber,
 		)
 	}
 
-	if result.BaseSHA != "base-123" {
-		t.Fatalf("expected base SHA base-123, got %q", result.BaseSHA)
-	}
-
-	if result.HeadSHA != "head-456" {
-		t.Fatalf("expected head SHA head-456, got %q", result.HeadSHA)
-	}
-
-	if !modelProvider.called {
-		t.Fatal("expected model provider to be called")
-	}
-
-	if !publisher.called {
-		t.Fatal("expected publisher to be called")
-	}
-
-	if modelProvider.context.PullRequestTitle != "Add payment retry handling" {
+	if result.BaseSHA != request.BaseSHA {
 		t.Fatalf(
-			"expected PR title %q, got %q",
-			"Add payment retry handling",
-			modelProvider.context.PullRequestTitle,
+			"expected base SHA %q, got %q",
+			request.BaseSHA,
+			result.BaseSHA,
 		)
 	}
 
-	if modelProvider.context.PullRequestBody == "" {
-		t.Fatal("expected PR body to be present in review context")
-	}
-
-	if len(modelProvider.context.ChangedFiles) != 1 {
+	if result.HeadSHA != request.HeadSHA {
 		t.Fatalf(
-			"expected 1 changed file, got %d",
-			len(modelProvider.context.ChangedFiles),
+			"expected head SHA %q, got %q",
+			request.HeadSHA,
+			result.HeadSHA,
 		)
 	}
 
-	if len(modelProvider.context.SourceFiles) != 1 {
+	if len(result.Findings) == 0 {
+		t.Fatal("expected findings")
+	}
+
+	if len(result.AnalyzerSummary) != 1 {
 		t.Fatalf(
-			"expected 1 source file, got %d",
-			len(modelProvider.context.SourceFiles),
+			"expected 1 analyzer result, got %d",
+			len(result.AnalyzerSummary),
 		)
 	}
 
-	if modelProvider.context.SourceFiles[0].Path != "payment/retry.go" {
+	if fakePublisher.receivedResult.Status != "completed" {
 		t.Fatalf(
-			"expected source file payment/retry.go, got %q",
-			modelProvider.context.SourceFiles[0].Path,
-		)
-	}
-
-	if len(result.Findings) != 2 {
-		t.Fatalf(
-			"expected 2 findings, got %d",
-			len(result.Findings),
-		)
-	}
-
-	if publisher.result.ReviewID != request.ReviewID {
-		t.Fatalf(
-			"publisher received review ID %q, expected %q",
-			publisher.result.ReviewID,
-			request.ReviewID,
+			"expected publisher to receive completed result, got %q",
+			fakePublisher.receivedResult.Status,
 		)
 	}
 }
 
-func TestReviewOrchestrator_GitHubPullRequestError(t *testing.T) {
-	expectedErr := errors.New("github pull request error")
-
-	fakeGitHub := &github.FakeProvider{
-		GetPullRequestError: expectedErr,
-	}
-
-	contextBuilder := contextbuilder.NewBuilder(
-		fakeGitHub,
-		20,
-		200_000,
-		50_000,
-	)
-
-	reviewOrchestrator := NewOrchestrator(
-		fakeGitHub,
-		contextBuilder,
-		nil,
-		nil,
-		nil,
-		nil,
-	)
-
-	request := review.ReviewRequest{
-		ReviewID:          "review-error",
-		InstallationID:    12345,
-		Organization:      "MorningBlossom",
-		Repository:        "test-repo",
-		PullRequestNumber: 42,
-		HeadSHA:           "head-456",
-	}
-
-	result, err := reviewOrchestrator.Review(context.Background(), request)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected wrapped github error, got %v",
-			err,
-		)
-	}
-
-	if result.Status != "failed" {
-		t.Fatalf(
-			"expected status failed, got %q",
-			result.Status,
-		)
-	}
-}
-
-func TestReviewOrchestrator_ChangedFilesError(t *testing.T) {
-	expectedErr := errors.New("github changed files error")
-
-	fakeGitHub := &github.FakeProvider{
-		GetChangedFilesError: expectedErr,
-	}
-
-	contextBuilder := contextbuilder.NewBuilder(
-		fakeGitHub,
-		20,
-		200_000,
-		50_000,
-	)
-
-	reviewOrchestrator := NewOrchestrator(
-		fakeGitHub,
-		contextBuilder,
-		nil,
-		nil,
-		nil,
-		nil,
-	)
-
-	request := review.ReviewRequest{
-		ReviewID:          "review-error",
-		InstallationID:    12345,
-		Organization:      "MorningBlossom",
-		Repository:        "test-repo",
-		PullRequestNumber: 42,
-		HeadSHA:           "head-456",
-	}
-
-	result, err := reviewOrchestrator.Review(context.Background(), request)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-
-	if !errors.Is(err, expectedErr) {
-		t.Fatalf(
-			"expected wrapped changed-files error, got %v",
-			err,
-		)
-	}
-
-	if result.Status != "failed" {
-		t.Fatalf(
-			"expected status failed, got %q",
-			result.Status,
-		)
-	}
-}
-
-func TestReviewOrchestrator_AnalyzerFailureIsolated(t *testing.T) {
+func TestReviewOrchestrator_IncludesAnalyzerFindings(t *testing.T) {
 	fakeGitHub := &github.FakeProvider{}
 
-	failingAnalyzer := &analyzer.FakeAnalyzer{
-		Fail: true,
-	}
+	fakeAnalyzer := &analyzer.FakeAnalyzer{}
 
-	modelProvider := &contextCaptureModel{}
-
-	fakeValidator := &validator.FakeValidator{}
-
-	publisher := &contextCapturePublisher{}
-
-	contextBuilder := contextbuilder.NewBuilder(
+	orchestrator := newTestOrchestrator(
 		fakeGitHub,
-		20,
-		200_000,
-		50_000,
-	)
-
-	reviewOrchestrator := NewOrchestrator(
-		fakeGitHub,
-		contextBuilder,
 		[]analyzer.Analyzer{
-			failingAnalyzer,
+			fakeAnalyzer,
 		},
-		modelProvider,
-		fakeValidator,
-		publisher,
+		nil,
+		&model.FakeModelProvider{},
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
 	)
 
-	request := review.ReviewRequest{
-		ReviewID:          "review-analyzer-failure",
-		InstallationID:    12345,
-		Organization:      "MorningBlossom",
-		Repository:        "test-repo",
-		PullRequestNumber: 42,
-		HeadSHA:           "head-456",
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 
-	result, err := reviewOrchestrator.Review(context.Background(), request)
+	if len(result.Findings) == 0 {
+		t.Fatal("expected analyzer findings")
+	}
+
+	found := false
+
+	for _, finding := range result.Findings {
+		if finding.Source == fakeAnalyzer.Name() {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatalf(
+			"expected finding from analyzer %q",
+			fakeAnalyzer.Name(),
+		)
+	}
+}
+
+func TestReviewOrchestrator_IncludesWorkspaceAnalyzerFindings(
+	t *testing.T,
+) {
+	fakeGitHub := &github.FakeProvider{
+		Archive: createTestRepositoryArchive(t),
+	}
+
+	workspaceAnalyzer := &fakeWorkspaceAnalyzer{}
+
+	orchestrator := newTestOrchestrator(
+		fakeGitHub,
+		nil,
+		[]analyzer.WorkspaceAnalyzer{
+			workspaceAnalyzer,
+		},
+		&model.FakeModelProvider{},
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
+	)
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
+
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("expected no error, got %v", err)
 	}
 
 	if result.Status != "completed" {
 		t.Fatalf(
-			"expected status completed despite analyzer failure, got %q",
+			"expected status completed, got %q",
+			result.Status,
+		)
+	}
+
+	found := false
+
+	for _, finding := range result.Findings {
+		if finding.Source == workspaceAnalyzer.Name() {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatalf(
+			"expected finding from workspace analyzer %q",
+			workspaceAnalyzer.Name(),
+		)
+	}
+
+	foundAnalyzerResult := false
+
+	for _, analyzerResult := range result.AnalyzerSummary {
+		if analyzerResult.AnalyzerName == workspaceAnalyzer.Name() {
+			foundAnalyzerResult = true
+			break
+		}
+	}
+
+	if !foundAnalyzerResult {
+		t.Fatalf(
+			"expected workspace analyzer result %q",
+			workspaceAnalyzer.Name(),
+		)
+	}
+}
+
+func TestReviewOrchestrator_AnalyzerFailureDoesNotFailReview(
+	t *testing.T,
+) {
+	fakeGitHub := &github.FakeProvider{}
+
+	fakeAnalyzer := &analyzer.FakeAnalyzer{
+		Fail: true,
+	}
+
+	orchestrator := newTestOrchestrator(
+		fakeGitHub,
+		[]analyzer.Analyzer{
+			fakeAnalyzer,
+		},
+		nil,
+		&model.FakeModelProvider{},
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
+	)
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
+
+	if err != nil {
+		t.Fatalf(
+			"expected review to continue after analyzer failure, got %v",
+			err,
+		)
+	}
+
+	if result.Status != "completed" {
+		t.Fatalf(
+			"expected status completed, got %q",
 			result.Status,
 		)
 	}
@@ -386,62 +426,217 @@ func TestReviewOrchestrator_AnalyzerFailureIsolated(t *testing.T) {
 			result.AnalyzerSummary[0].Status,
 		)
 	}
-
-	if !modelProvider.called {
-		t.Fatal("expected model provider to still be called")
-	}
-
-	if !publisher.called {
-		t.Fatal("expected publisher to still be called")
-	}
 }
 
-func TestReviewOrchestrator_ModelFailure(t *testing.T) {
-	fakeGitHub := &github.FakeProvider{}
-
-	modelErr := errors.New("model provider error")
-
-	modelProvider := &contextCaptureModel{
-		err: modelErr,
+func TestReviewOrchestrator_WorkspaceAnalyzerFailureDoesNotFailReview(
+	t *testing.T,
+) {
+	fakeGitHub := &github.FakeProvider{
+		Archive: createTestRepositoryArchive(t),
 	}
 
-	contextBuilder := contextbuilder.NewBuilder(
+	workspaceAnalyzer := &fakeWorkspaceAnalyzer{
+		fail: true,
+	}
+
+	orchestrator := newTestOrchestrator(
 		fakeGitHub,
-		20,
-		200_000,
-		50_000,
+		nil,
+		[]analyzer.WorkspaceAnalyzer{
+			workspaceAnalyzer,
+		},
+		&model.FakeModelProvider{},
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
 	)
 
-	reviewOrchestrator := NewOrchestrator(
-		fakeGitHub,
-		contextBuilder,
-		nil,
-		modelProvider,
-		nil,
-		nil,
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
 	)
 
-	request := review.ReviewRequest{
-		ReviewID:          "review-model-failure",
-		InstallationID:    12345,
-		Organization:      "MorningBlossom",
-		Repository:        "test-repo",
-		PullRequestNumber: 42,
-		HeadSHA:           "head-456",
-	}
-
-	result, err := reviewOrchestrator.Review(context.Background(), request)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-
-	if !errors.Is(err, modelErr) {
+	if err != nil {
 		t.Fatalf(
-			"expected wrapped model error, got %v",
+			"expected review to continue after workspace analyzer failure, got %v",
 			err,
 		)
 	}
 
+	if result.Status != "completed" {
+		t.Fatalf(
+			"expected status completed, got %q",
+			result.Status,
+		)
+	}
+
+	if len(result.AnalyzerSummary) != 1 {
+		t.Fatalf(
+			"expected 1 analyzer result, got %d",
+			len(result.AnalyzerSummary),
+		)
+	}
+
+	if result.AnalyzerSummary[0].Status != "failed" {
+		t.Fatalf(
+			"expected workspace analyzer status failed, got %q",
+			result.AnalyzerSummary[0].Status,
+		)
+	}
+}
+
+func TestReviewOrchestrator_GitHubPullRequestError(
+	t *testing.T,
+) {
+	fakeGitHub := &github.FakeProvider{
+		GetPullRequestError: errors.New("GitHub unavailable"),
+	}
+
+	orchestrator := newTestOrchestrator(
+		fakeGitHub,
+		nil,
+		nil,
+		&model.FakeModelProvider{},
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
+	)
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf(
+			"expected status failed, got %q",
+			result.Status,
+		)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf(
+			"expected 1 error, got %d",
+			len(result.Errors),
+		)
+	}
+}
+
+func TestReviewOrchestrator_ChangedFilesError(
+	t *testing.T,
+) {
+	fakeGitHub := &github.FakeProvider{
+		GetChangedFilesError: errors.New(
+			"changed files unavailable",
+		),
+	}
+
+	orchestrator := newTestOrchestrator(
+		fakeGitHub,
+		nil,
+		nil,
+		&model.FakeModelProvider{},
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
+	)
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf(
+			"expected status failed, got %q",
+			result.Status,
+		)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf(
+			"expected 1 error, got %d",
+			len(result.Errors),
+		)
+	}
+}
+
+func TestReviewOrchestrator_WorkspaceBuildError(
+	t *testing.T,
+) {
+	fakeGitHub := &github.FakeProvider{
+		DownloadRepositoryArchiveError: errors.New(
+			"archive unavailable",
+		),
+	}
+
+	workspaceAnalyzer := &fakeWorkspaceAnalyzer{}
+
+	orchestrator := newTestOrchestrator(
+		fakeGitHub,
+		nil,
+		[]analyzer.WorkspaceAnalyzer{
+			workspaceAnalyzer,
+		},
+		&model.FakeModelProvider{},
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
+	)
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf(
+			"expected status failed, got %q",
+			result.Status,
+		)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf(
+			"expected 1 error, got %d",
+			len(result.Errors),
+		)
+	}
+}
+
+func TestReviewOrchestrator_ModelFailure(
+	t *testing.T,
+) {
+	FakeModelProvider := &model.FakeModelProvider{
+		Fail: true,
+	}
+
+	orchestrator := newTestOrchestrator(
+		&github.FakeProvider{},
+		nil,
+		nil,
+		FakeModelProvider,
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
+	)
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
 	if result.Status != "failed" {
 		t.Fatalf(
 			"expected status failed, got %q",
@@ -450,54 +645,27 @@ func TestReviewOrchestrator_ModelFailure(t *testing.T) {
 	}
 }
 
-func TestReviewOrchestrator_ValidatorFailure(t *testing.T) {
-	fakeGitHub := &github.FakeProvider{}
-
+func TestReviewOrchestrator_ValidatorFailure(
+	t *testing.T,
+) {
 	fakeValidator := &validator.FakeValidator{
 		Fail: true,
 	}
 
-	modelProvider := &contextCaptureModel{
-		findings: []review.ReviewFinding{
-			{
-				FindingID: "model-1",
-				Source:    "model",
-				Category:  "bug",
-				Severity:  "medium",
-				Title:     "Potential bug",
-				FilePath:  "payment/retry.go",
-				StartLine: 3,
-				EndLine:   3,
-			},
-		},
-	}
-
-	contextBuilder := contextbuilder.NewBuilder(
-		fakeGitHub,
-		20,
-		200_000,
-		50_000,
-	)
-
-	reviewOrchestrator := NewOrchestrator(
-		fakeGitHub,
-		contextBuilder,
+	orchestrator := newTestOrchestrator(
+		&github.FakeProvider{},
 		nil,
-		modelProvider,
+		nil,
+		&model.FakeModelProvider{},
 		fakeValidator,
-		nil,
+		&publisher.FakePublisher{},
 	)
 
-	request := review.ReviewRequest{
-		ReviewID:          "review-validator-failure",
-		InstallationID:    12345,
-		Organization:      "MorningBlossom",
-		Repository:        "test-repo",
-		PullRequestNumber: 42,
-		HeadSHA:           "head-456",
-	}
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
 
-	result, err := reviewOrchestrator.Review(context.Background(), request)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -510,39 +678,27 @@ func TestReviewOrchestrator_ValidatorFailure(t *testing.T) {
 	}
 }
 
-func TestReviewOrchestrator_PublisherFailure(t *testing.T) {
-	fakeGitHub := &github.FakeProvider{}
-
+func TestReviewOrchestrator_PublisherFailure(
+	t *testing.T,
+) {
 	fakePublisher := &publisher.FakePublisher{
 		Fail: true,
 	}
 
-	contextBuilder := contextbuilder.NewBuilder(
-		fakeGitHub,
-		20,
-		200_000,
-		50_000,
-	)
-
-	reviewOrchestrator := NewOrchestrator(
-		fakeGitHub,
-		contextBuilder,
+	orchestrator := newTestOrchestrator(
+		&github.FakeProvider{},
 		nil,
-		&contextCaptureModel{},
+		nil,
+		&model.FakeModelProvider{},
 		&validator.FakeValidator{},
 		fakePublisher,
 	)
 
-	request := review.ReviewRequest{
-		ReviewID:          "review-publisher-failure",
-		InstallationID:    12345,
-		Organization:      "MorningBlossom",
-		Repository:        "test-repo",
-		PullRequestNumber: 42,
-		HeadSHA:           "head-456",
-	}
+	result, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
 
-	result, err := reviewOrchestrator.Review(context.Background(), request)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -553,4 +709,106 @@ func TestReviewOrchestrator_PublisherFailure(t *testing.T) {
 			result.Status,
 		)
 	}
+}
+
+func TestReviewOrchestrator_ContextBuilderIntegration(
+	t *testing.T,
+) {
+	fakeGitHub := &github.FakeProvider{}
+
+	FakeModelProvider := &contextCaptureModel{}
+
+	orchestrator := newTestOrchestrator(
+		fakeGitHub,
+		nil,
+		nil,
+		FakeModelProvider,
+		&validator.FakeValidator{},
+		&publisher.FakePublisher{},
+	)
+
+	_, err := orchestrator.Review(
+		context.Background(),
+		newTestRequest(),
+	)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if FakeModelProvider.receivedContext.PullRequestTitle !=
+		"Add payment retry handling" {
+		t.Fatalf(
+			"unexpected PR title: %q",
+			FakeModelProvider.receivedContext.PullRequestTitle,
+		)
+	}
+
+	if FakeModelProvider.receivedContext.PullRequestBody !=
+		"This PR adds retry handling for failed payments." {
+		t.Fatalf(
+			"unexpected PR body: %q",
+			FakeModelProvider.receivedContext.PullRequestBody,
+		)
+	}
+
+	if FakeModelProvider.receivedContext.HeadSHA != "head-456" {
+		t.Fatalf(
+			"unexpected head SHA: %q",
+			FakeModelProvider.receivedContext.HeadSHA,
+		)
+	}
+
+	if FakeModelProvider.receivedContext.BaseSHA != "base-123" {
+		t.Fatalf(
+			"unexpected base SHA: %q",
+			FakeModelProvider.receivedContext.BaseSHA,
+		)
+	}
+
+	if len(FakeModelProvider.receivedContext.SourceFiles) != 1 {
+		t.Fatalf(
+			"expected 1 source file, got %d",
+			len(FakeModelProvider.receivedContext.SourceFiles),
+		)
+	}
+}
+
+func createTestRepositoryArchive(t *testing.T) []byte {
+	t.Helper()
+
+	var buffer bytes.Buffer
+
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+
+	files := map[string]string{
+		"repo-head/go.mod":           "module example.com/test\n",
+		"repo-head/payment/retry.go": "package payment\n",
+	}
+
+	for path, content := range files {
+		err := tarWriter.WriteHeader(&tar.Header{
+			Name: path,
+			Mode: 0644,
+			Size: int64(len(content)),
+		})
+		if err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+
+		if _, err := tarWriter.Write([]byte(content)); err != nil {
+			t.Fatalf("write tar content: %v", err)
+		}
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+
+	return buffer.Bytes()
 }

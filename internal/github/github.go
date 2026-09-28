@@ -31,6 +31,14 @@ type Provider interface {
 		ref string,
 		path string,
 	) (string, error)
+
+	DownloadRepositoryArchive(
+		ctx context.Context,
+		installationID int64,
+		organization string,
+		repository string,
+		ref string,
+	) ([]byte, error)
 }
 
 type PullRequest struct {

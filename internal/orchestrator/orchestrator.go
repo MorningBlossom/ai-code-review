@@ -12,6 +12,7 @@ import (
 	"github.com/MorningBlossom/ai-code-review/internal/publisher"
 	"github.com/MorningBlossom/ai-code-review/internal/review"
 	"github.com/MorningBlossom/ai-code-review/internal/validator"
+	"github.com/MorningBlossom/ai-code-review/internal/workspace"
 )
 
 type Orchestrator interface {
@@ -22,35 +23,44 @@ type Orchestrator interface {
 }
 
 type ReviewOrchestrator struct {
-	github         github.Provider
-	contextBuilder *contextbuilder.Builder
-	analyzers      []analyzer.Analyzer
-	model          model.ModelProvider
-	validator      validator.Validator
-	publisher      publisher.Publisher
+	github           github.Provider
+	contextBuilder   *contextbuilder.Builder
+	workspaceBuilder *workspace.SnapshotBuilder
+
+	analyzers          []analyzer.Analyzer
+	workspaceAnalyzers []analyzer.WorkspaceAnalyzer
+
+	model     model.ModelProvider
+	validator validator.Validator
+	publisher publisher.Publisher
 }
 
 func NewOrchestrator(
 	githubProvider github.Provider,
 	contextBuilder *contextbuilder.Builder,
+	workspaceBuilder *workspace.SnapshotBuilder,
 	analyzers []analyzer.Analyzer,
+	workspaceAnalyzers []analyzer.WorkspaceAnalyzer,
 	modelProvider model.ModelProvider,
 	findingValidator validator.Validator,
 	reviewPublisher publisher.Publisher,
 ) *ReviewOrchestrator {
 	return &ReviewOrchestrator{
-		github:         githubProvider,
-		contextBuilder: contextBuilder,
-		analyzers:      analyzers,
-		model:          modelProvider,
-		validator:      findingValidator,
-		publisher:      reviewPublisher,
+		github:             githubProvider,
+		contextBuilder:     contextBuilder,
+		workspaceBuilder:   workspaceBuilder,
+		analyzers:          analyzers,
+		workspaceAnalyzers: workspaceAnalyzers,
+		model:              modelProvider,
+		validator:          findingValidator,
+		publisher:          reviewPublisher,
 	}
 }
 
 func (o *ReviewOrchestrator) Review(
 	ctx context.Context,
-	request review.ReviewRequest) (review.ReviewResult, error) {
+	request review.ReviewRequest,
+) (review.ReviewResult, error) {
 	start := time.Now()
 
 	result := review.ReviewResult{
@@ -63,24 +73,21 @@ func (o *ReviewOrchestrator) Review(
 		Status:            "running",
 	}
 
-	// Get PullRequest
-	pullRequest, err := o.github.GetPullRequest(
+	pr, err := o.github.GetPullRequest(
 		ctx,
 		request.InstallationID,
 		request.Organization,
 		request.Repository,
 		request.PullRequestNumber,
 	)
-
 	if err != nil {
-		result.Status = "failed"
-		result.DurationMillis = time.Since(start).Milliseconds()
-		result.Errors = append(result.Errors, fmt.Sprintf("get pull request: %v", err))
-
-		return result, err
+		return o.failResult(
+			result,
+			start,
+			fmt.Errorf("get pull request: %w", err),
+		)
 	}
 
-	//	Get Changed Files
 	changedFiles, err := o.github.GetChangedFiles(
 		ctx,
 		request.InstallationID,
@@ -89,74 +96,158 @@ func (o *ReviewOrchestrator) Review(
 		request.PullRequestNumber,
 	)
 	if err != nil {
-		result.Status = "failed"
-		result.DurationMillis = time.Since(start).Milliseconds()
-		result.Errors = append(result.Errors, fmt.Sprintf("get changed files: %v", err))
-		return result, err
+		return o.failResult(
+			result,
+			start,
+			fmt.Errorf("get changed files: %w", err),
+		)
 	}
 
 	reviewContext, err := o.contextBuilder.Build(
 		ctx,
 		request,
-		pullRequest,
+		pr,
 		changedFiles,
 	)
 	if err != nil {
-		result.Status = "failed"
-		result.Errors = append(
-			result.Errors,
-			err.Error(),
+		return o.failResult(
+			result,
+			start,
+			fmt.Errorf("build review context: %w", err),
+		)
+	}
+
+	// Run analyzers that operate directly on the review context.
+	for _, currentAnalyzer := range o.analyzers {
+		analyzerResult := currentAnalyzer.Analyze(
+			ctx,
+			reviewContext,
 		)
 
-		return result, err
+		result.AnalyzerSummary = append(
+			result.AnalyzerSummary,
+			analyzerResult,
+		)
+
+		result.Findings = append(
+			result.Findings,
+			analyzerResult.Findings...,
+		)
 	}
 
-	for _, analyzer := range o.analyzers {
-		analyzerResult := analyzer.Analyze(ctx, reviewContext)
-		result.AnalyzerSummary = append(result.AnalyzerSummary, analyzerResult)
-		reviewContext.AnalyzerFindings = append(reviewContext.AnalyzerFindings, analyzerResult.Findings...)
+	// Build a complete repository workspace for repository-level analyzers.
+	if len(o.workspaceAnalyzers) > 0 {
+		if o.workspaceBuilder == nil {
+			return o.failResult(
+				result,
+				start,
+				fmt.Errorf(
+					"workspace analyzers configured without workspace builder",
+				),
+			)
+		}
+
+		ws, err := o.workspaceBuilder.Build(
+			ctx,
+			request.InstallationID,
+			request.Organization,
+			request.Repository,
+			request.HeadSHA,
+		)
+		if err != nil {
+			return o.failResult(
+				result,
+				start,
+				fmt.Errorf(
+					"build repository workspace: %w",
+					err,
+				),
+			)
+		}
+
+		defer ws.Close()
+
+		for _, currentAnalyzer := range o.workspaceAnalyzers {
+			analyzerResult := currentAnalyzer.AnalyzeWorkspace(
+				ctx,
+				ws,
+			)
+
+			result.AnalyzerSummary = append(
+				result.AnalyzerSummary,
+				analyzerResult,
+			)
+
+			result.Findings = append(
+				result.Findings,
+				analyzerResult.Findings...,
+			)
+		}
 	}
 
-	// Run Model Review
-	modelFindings, err := o.model.Review(ctx, reviewContext)
+	// Run the model review.
+	modelFindings, err := o.model.Review(
+		ctx,
+		reviewContext,
+	)
 	if err != nil {
-		result.Status = "failed"
-		result.DurationMillis = time.Since(start).Milliseconds()
-		result.Errors = append(result.Errors, fmt.Sprintf("model review: %v", err))
-
-		return result, err
+		return o.failResult(
+			result,
+			start,
+			fmt.Errorf("model review: %w", err),
+		)
 	}
 
-	// combine analyzer + model findings
-	allFindings := append(
-		[]review.ReviewFinding{},
-		reviewContext.AnalyzerFindings...,
+	result.Findings = append(
+		result.Findings,
+		modelFindings...,
 	)
 
-	allFindings = append(allFindings, modelFindings...)
-
-	// validate findings
-	validFindings, err := o.validator.Validate(ctx, request, allFindings)
+	// Validate and deduplicate all findings.
+	validatedFindings, err := o.validator.Validate(
+		ctx,
+		request,
+		result.Findings,
+	)
 	if err != nil {
-		result.Status = "failed"
-		result.DurationMillis = time.Since(start).Milliseconds()
-		result.Errors = append(result.Errors, fmt.Sprintf("validate findings: %v", err))
-
-		return result, err
+		return o.failResult(
+			result,
+			start,
+			fmt.Errorf("validate findings: %w", err),
+		)
 	}
-	result.Findings = validFindings
 
-	// publish review
-	if err := o.publisher.Publish(ctx, request, result); err != nil {
-		result.Status = "failed"
-		result.DurationMillis = time.Since(start).Milliseconds()
-		result.Errors = append(result.Errors, fmt.Sprintf("publish review: %v", err))
-
-		return result, err
-	}
+	result.Findings = validatedFindings
 
 	result.Status = "completed"
 	result.DurationMillis = time.Since(start).Milliseconds()
 
+	if err := o.publisher.Publish(
+		ctx,
+		request,
+		result,
+	); err != nil {
+		return o.failResult(
+			result,
+			start,
+			fmt.Errorf("publish review: %w", err),
+		)
+	}
+
 	return result, nil
+}
+
+func (o *ReviewOrchestrator) failResult(
+	result review.ReviewResult,
+	start time.Time,
+	err error,
+) (review.ReviewResult, error) {
+	result.Status = "failed"
+	result.DurationMillis = time.Since(start).Milliseconds()
+	result.Errors = append(
+		result.Errors,
+		err.Error(),
+	)
+
+	return result, err
 }

@@ -8,8 +8,10 @@ import (
 )
 
 type FakeProvider struct {
-	GetPullRequestError  error
-	GetChangedFilesError error
+	GetPullRequestError            error
+	GetChangedFilesError           error
+	Archive                        []byte
+	DownloadRepositoryArchiveError error
 }
 
 func (f *FakeProvider) GetPullRequest(
@@ -68,6 +70,20 @@ func (f *FakeProvider) GetFileContent(
 func retryPayment() error {
 	return nil
 }`, nil
+}
+
+func (f *FakeProvider) DownloadRepositoryArchive(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+) ([]byte, error) {
+	if f.DownloadRepositoryArchiveError != nil {
+		return nil, f.DownloadRepositoryArchiveError
+	}
+
+	return f.Archive, nil
 }
 
 var ErrFakeGitHub = errors.New("fake github error")

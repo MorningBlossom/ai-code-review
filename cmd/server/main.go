@@ -13,6 +13,7 @@ import (
 	"github.com/MorningBlossom/ai-code-review/internal/orchestrator"
 	"github.com/MorningBlossom/ai-code-review/internal/publisher"
 	"github.com/MorningBlossom/ai-code-review/internal/validator"
+	"github.com/MorningBlossom/ai-code-review/internal/workspace"
 )
 
 func main() {
@@ -41,8 +42,19 @@ func main() {
 		log.Fatalf("create GitHub App authenticator: %v", err)
 	}
 
-	fakeAnalyzers := []analyzer.Analyzer{
-		&analyzer.FakeAnalyzer{},
+	commandRunner := analyzer.NewOSCommandRunner()
+
+	analyzers := []analyzer.Analyzer{
+		analyzer.NewGofmtAnalyzer(commandRunner),
+		analyzer.NewGoVetAnalyzer(),
+		analyzer.NewGoTestAnalyzer(),
+		analyzer.NewGosecAnalyzer(),
+	}
+
+	workspaceAnalyzers := []analyzer.WorkspaceAnalyzer{
+		analyzer.NewGoVetAnalyzer(),
+		analyzer.NewGoTestAnalyzer(),
+		analyzer.NewStaticcheckAnalyzer(),
 	}
 
 	fakeModel := &model.FakeModelProvider{}
@@ -66,10 +78,16 @@ func main() {
 		50_000,
 	)
 
+	workspaceBuilder := workspace.NewSnapshotBuilder(
+		githubClient,
+	)
+
 	reviewOrchestrator := orchestrator.NewOrchestrator(
 		githubClient,
 		contextBuilder,
-		fakeAnalyzers,
+		workspaceBuilder,
+		analyzers,
+		workspaceAnalyzers,
 		fakeModel,
 		fakeValidator,
 		fakePublisher,

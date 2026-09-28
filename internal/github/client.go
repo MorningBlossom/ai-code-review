@@ -1,11 +1,14 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/MorningBlossom/ai-code-review/internal/review"
@@ -329,4 +332,89 @@ func (c *Client) GetFileContent(
 	}
 
 	return string(decoded), nil
+}
+
+func (c *Client) DownloadRepositoryArchive(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+) ([]byte, error) {
+	token, err := c.authenticator.GetInstallationToken(
+		ctx,
+		installationID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get installation token: %w",
+			err,
+		)
+	}
+
+	archiveURL := fmt.Sprintf(
+		"%s/repos/%s/%s/tarball/%s",
+		c.baseURL,
+		organization,
+		repository,
+		url.PathEscape(ref),
+	)
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		archiveURL,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create repository archive request: %w",
+			err,
+		)
+	}
+
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+token,
+	)
+	req.Header.Set(
+		"Accept",
+		"application/vnd.github+json",
+	)
+	req.Header.Set(
+		"X-GitHub-Api-Version",
+		"2022-11-28",
+	)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"request repository archive: %w",
+			err,
+		)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"GitHub returned repository archive status %d",
+			resp.StatusCode,
+		)
+	}
+
+	archive, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"read repository archive: %w",
+			err,
+		)
+	}
+
+	if len(bytes.TrimSpace(archive)) == 0 {
+		return nil, fmt.Errorf(
+			"GitHub returned an empty repository archive",
+		)
+	}
+
+	return archive, nil
 }
