@@ -14,6 +14,7 @@ type FakeProvider struct {
 
 func (f *FakeProvider) GetPullRequest(
 	ctx context.Context,
+	installationID int64,
 	organization string,
 	repository string,
 	pullRequestNumber int,
@@ -25,6 +26,7 @@ func (f *FakeProvider) GetPullRequest(
 	return PullRequest{
 		Number:  pullRequestNumber,
 		Title:   "Add payment retry handling",
+		Body:    "This PR adds retry handling for failed payments.",
 		BaseSHA: "base-123",
 		HeadSHA: "head-456",
 		Author:  "test-user",
@@ -33,6 +35,7 @@ func (f *FakeProvider) GetPullRequest(
 
 func (f *FakeProvider) GetChangedFiles(
 	ctx context.Context,
+	installationID int64,
 	organization string,
 	repository string,
 	pullRequestNumber int,
@@ -54,6 +57,7 @@ func (f *FakeProvider) GetChangedFiles(
 
 func (f *FakeProvider) GetFileContent(
 	ctx context.Context,
+	installationID int64,
 	organization string,
 	repository string,
 	ref string,

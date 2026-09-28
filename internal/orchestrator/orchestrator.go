@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/MorningBlossom/ai-code-review/internal/analyzer"
+	"github.com/MorningBlossom/ai-code-review/internal/contextbuilder"
 	"github.com/MorningBlossom/ai-code-review/internal/github"
 	"github.com/MorningBlossom/ai-code-review/internal/model"
 	"github.com/MorningBlossom/ai-code-review/internal/publisher"
@@ -21,20 +22,29 @@ type Orchestrator interface {
 }
 
 type ReviewOrchestrator struct {
-	githubProvider github.Provider
+	github         github.Provider
+	contextBuilder *contextbuilder.Builder
 	analyzers      []analyzer.Analyzer
 	model          model.ModelProvider
 	validator      validator.Validator
 	publisher      publisher.Publisher
 }
 
-func NewOrchestrator(github github.Provider, analyzers []analyzer.Analyzer, modelProvider model.ModelProvider, validator validator.Validator, publisher publisher.Publisher) *ReviewOrchestrator {
+func NewOrchestrator(
+	githubProvider github.Provider,
+	contextBuilder *contextbuilder.Builder,
+	analyzers []analyzer.Analyzer,
+	modelProvider model.ModelProvider,
+	findingValidator validator.Validator,
+	reviewPublisher publisher.Publisher,
+) *ReviewOrchestrator {
 	return &ReviewOrchestrator{
-		githubProvider: github,
+		github:         githubProvider,
+		contextBuilder: contextBuilder,
 		analyzers:      analyzers,
 		model:          modelProvider,
-		validator:      validator,
-		publisher:      publisher,
+		validator:      findingValidator,
+		publisher:      reviewPublisher,
 	}
 }
 
@@ -54,11 +64,13 @@ func (o *ReviewOrchestrator) Review(
 	}
 
 	// Get PullRequest
-	pullRequest, err := o.githubProvider.GetPullRequest(
+	pullRequest, err := o.github.GetPullRequest(
 		ctx,
+		request.InstallationID,
 		request.Organization,
 		request.Repository,
-		request.PullRequestNumber)
+		request.PullRequestNumber,
+	)
 
 	if err != nil {
 		result.Status = "failed"
@@ -69,7 +81,13 @@ func (o *ReviewOrchestrator) Review(
 	}
 
 	//	Get Changed Files
-	changedFiles, err := o.githubProvider.GetChangedFiles(ctx, request.Organization, request.Repository, request.PullRequestNumber)
+	changedFiles, err := o.github.GetChangedFiles(
+		ctx,
+		request.InstallationID,
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
+	)
 	if err != nil {
 		result.Status = "failed"
 		result.DurationMillis = time.Since(start).Milliseconds()
@@ -77,16 +95,20 @@ func (o *ReviewOrchestrator) Review(
 		return result, err
 	}
 
-	// Build Review Context
-	reviewContext := review.ReviewContext{
-		Organization:      request.Organization,
-		Repository:        request.Repository,
-		PullRequestNumber: request.PullRequestNumber,
-		PullRequestTitle:  pullRequest.Title,
-		PullRequestBody:   "",
-		BaseSHA:           pullRequest.BaseSHA,
-		HeadSHA:           pullRequest.HeadSHA,
-		ChangedFiles:      changedFiles,
+	reviewContext, err := o.contextBuilder.Build(
+		ctx,
+		request,
+		pullRequest,
+		changedFiles,
+	)
+	if err != nil {
+		result.Status = "failed"
+		result.Errors = append(
+			result.Errors,
+			err.Error(),
+		)
+
+		return result, err
 	}
 
 	for _, analyzer := range o.analyzers {

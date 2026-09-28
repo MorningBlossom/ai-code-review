@@ -9,6 +9,7 @@ import (
 type Provider interface {
 	GetPullRequest(
 		ctx context.Context,
+		installationID int64,
 		organization string,
 		repository string,
 		pullRequestNumber int,
@@ -16,6 +17,7 @@ type Provider interface {
 
 	GetChangedFiles(
 		ctx context.Context,
+		installationID int64,
 		organization string,
 		repository string,
 		pullRequestNumber int,
@@ -23,6 +25,7 @@ type Provider interface {
 
 	GetFileContent(
 		ctx context.Context,
+		installationID int64,
 		organization string,
 		repository string,
 		ref string,
@@ -33,6 +36,7 @@ type Provider interface {
 type PullRequest struct {
 	Number  int
 	Title   string
+	Body    string
 	BaseSHA string
 	HeadSHA string
 	Author  string
