@@ -2,9 +2,6 @@ name: jira_validation.yml
 on:
   pull_request:
     types: [opened, synchronize, edited, reopened]
-  push:
-    branches:
-      - main
 
 permissions:
   pull-requests: read
