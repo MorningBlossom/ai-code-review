@@ -1,0 +1,17 @@
+name: jira_validation.yml
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+  push:
+    branches:
+      - main
+
+permissions:
+  pull-requests: read
+
+jobs:
+  jira_validation:
+        uses: MorningBlossom/ci-cd/.github/workflows/jira-validation.yml@main
+        with:
+          jira-key: 'AI'
+        secrets: inherit
