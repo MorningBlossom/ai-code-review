@@ -25,7 +25,7 @@ type Orchestrator interface {
 type ReviewOrchestrator struct {
 	github           github.Provider
 	contextBuilder   *contextbuilder.Builder
-	workspaceBuilder *workspace.SnapshotBuilder
+	workspaceBuilder workspace.Builder
 
 	analyzers          []analyzer.Analyzer
 	workspaceAnalyzers []analyzer.WorkspaceAnalyzer
@@ -38,7 +38,7 @@ type ReviewOrchestrator struct {
 func NewOrchestrator(
 	githubProvider github.Provider,
 	contextBuilder *contextbuilder.Builder,
-	workspaceBuilder *workspace.SnapshotBuilder,
+	workspaceBuilder workspace.Builder,
 	analyzers []analyzer.Analyzer,
 	workspaceAnalyzers []analyzer.WorkspaceAnalyzer,
 	modelProvider model.ModelProvider,
@@ -124,15 +124,18 @@ func (o *ReviewOrchestrator) Review(
 			reviewContext,
 		)
 
-		result.AnalyzerSummary = append(
-			result.AnalyzerSummary,
-			analyzerResult,
-		)
+		appendAnalyzerResult(&result, &reviewContext, analyzerResult)
 
-		result.Findings = append(
-			result.Findings,
-			analyzerResult.Findings...,
-		)
+		if analyzerResult.Status == "failed" {
+			return o.failResult(
+				result,
+				start,
+				fmt.Errorf(
+					"analyzer %s failed",
+					analyzerResult.AnalyzerName,
+				),
+			)
+		}
 	}
 
 	// Build a complete repository workspace for repository-level analyzers.
@@ -173,15 +176,18 @@ func (o *ReviewOrchestrator) Review(
 				ws,
 			)
 
-			result.AnalyzerSummary = append(
-				result.AnalyzerSummary,
-				analyzerResult,
-			)
+			appendAnalyzerResult(&result, &reviewContext, analyzerResult)
 
-			result.Findings = append(
-				result.Findings,
-				analyzerResult.Findings...,
-			)
+			if analyzerResult.Status == "failed" {
+				return o.failResult(
+					result,
+					start,
+					fmt.Errorf(
+						"workspace analyzer %s failed",
+						analyzerResult.AnalyzerName,
+					),
+				)
+			}
 		}
 	}
 
@@ -204,9 +210,10 @@ func (o *ReviewOrchestrator) Review(
 	)
 
 	// Validate and deduplicate all findings.
-	validatedFindings, err := o.validator.Validate(
+	validatedFindings, err := o.validator.ValidateWithContext(
 		ctx,
 		request,
+		reviewContext,
 		result.Findings,
 	)
 	if err != nil {
@@ -250,4 +257,25 @@ func (o *ReviewOrchestrator) failResult(
 	)
 
 	return result, err
+}
+
+func appendAnalyzerResult(
+	result *review.ReviewResult,
+	reviewContext *review.ReviewContext,
+	analyzerResult review.AnalyzerResult,
+) {
+	result.AnalyzerSummary = append(
+		result.AnalyzerSummary,
+		analyzerResult,
+	)
+
+	result.Findings = append(
+		result.Findings,
+		analyzerResult.Findings...,
+	)
+
+	reviewContext.AnalyzerFindings = append(
+		reviewContext.AnalyzerFindings,
+		analyzerResult.Findings...,
+	)
 }

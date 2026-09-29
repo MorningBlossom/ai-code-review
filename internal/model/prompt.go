@@ -56,13 +56,70 @@ func buildReviewPrompt(
 		for _, finding := range ctx.AnalyzerFindings {
 			fmt.Fprintf(
 				&b,
-				"- [%s] %s: %s (%s:%d)\n",
-				finding.Severity,
-				finding.Title,
-				finding.Explanation,
-				finding.FilePath,
-				finding.StartLine,
+				"\n--- %s ---\n",
+				finding.Source,
 			)
+
+			fmt.Fprintf(
+				&b,
+				"Severity: %s\n",
+				finding.Severity,
+			)
+
+			fmt.Fprintf(
+				&b,
+				"Confidence: %.2f\n",
+				finding.Confidence,
+			)
+
+			fmt.Fprintf(
+				&b,
+				"Category: %s\n",
+				finding.Category,
+			)
+
+			fmt.Fprintf(
+				&b,
+				"Title: %s\n",
+				finding.Title,
+			)
+
+			fmt.Fprintf(
+				&b,
+				"File: %s\n",
+				finding.FilePath,
+			)
+
+			if finding.StartLine > 0 {
+				fmt.Fprintf(
+					&b,
+					"Lines: %d-%d\n",
+					finding.StartLine,
+					finding.EndLine,
+				)
+			}
+
+			fmt.Fprintf(
+				&b,
+				"Explanation: %s\n",
+				finding.Explanation,
+			)
+
+			if finding.Suggestion != "" {
+				fmt.Fprintf(
+					&b,
+					"Suggestion: %s\n",
+					finding.Suggestion,
+				)
+			}
+
+			if finding.Evidence != "" {
+				fmt.Fprintf(
+					&b,
+					"Evidence:\n%s\n",
+					finding.Evidence,
+				)
+			}
 		}
 	}
 
@@ -93,6 +150,10 @@ Rules:
 - Prefer changed code.
 - Do not invent files or line numbers.
 - Do not report formatting-only issues.
+- Treat deterministic analyzer findings as evidence, not automatically valid conclusions.
+- Verify deterministic analyzer findings against the supplied source code before reporting them.
+- Do not duplicate a deterministic finding unless additional reasoning or context makes it useful.
+- Do not report the same issue multiple times.
 - Do not include markdown fences.
 - Return only JSON.
 `)

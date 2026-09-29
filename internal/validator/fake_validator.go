@@ -22,3 +22,12 @@ func (f *FakeValidator) Validate(
 
 	return findings, nil
 }
+
+func (v *FakeValidator) ValidateWithContext(
+	ctx context.Context,
+	request review.ReviewRequest,
+	reviewContext review.ReviewContext,
+	findings []review.ReviewFinding,
+) ([]review.ReviewFinding, error) {
+	return v.Validate(ctx, request, findings)
+}

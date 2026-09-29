@@ -66,6 +66,7 @@ func main() {
 
 	analyzers := []analyzer.Analyzer{
 		analyzer.NewGofmtAnalyzer(commandRunner),
+		analyzer.NewGoRulesAnalyzer(),
 	}
 
 	workspaceAnalyzers := []analyzer.WorkspaceAnalyzer{
