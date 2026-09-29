@@ -10,17 +10,16 @@ func TestOSCommandRunner_Run_Success(t *testing.T) {
 
 	result := runner.Run(
 		context.Background(),
-		"sh",
-		"-c",
-		"printf 'hello'",
+		"go",
+		"version",
 	)
 
 	if result.ExitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
 	}
 
-	if result.Stdout != "hello" {
-		t.Fatalf("expected stdout %q, got %q", "hello", result.Stdout)
+	if result.Stdout == "" {
+		t.Fatal("expected stdout to contain Go version")
 	}
 
 	if result.Stderr != "" {
@@ -33,26 +32,27 @@ func TestOSCommandRunner_Run_Failure(t *testing.T) {
 
 	result := runner.Run(
 		context.Background(),
-		"sh",
-		"-c",
-		"printf 'failure' >&2; exit 2",
+		"gofmt",
+		"-unknown-flag",
 	)
 
-	if result.ExitCode != 2 {
-		t.Fatalf("expected exit code 2, got %d", result.ExitCode)
+	if result.ExitCode == 0 {
+		t.Fatal("expected non-zero exit code")
 	}
 
-	if result.Stderr != "failure" {
-		t.Fatalf("expected stderr %q, got %q", "failure", result.Stderr)
+	if result.Stderr == "" {
+		t.Fatal("expected stderr to contain command error")
 	}
 }
 
-func TestOSCommandRunner_Run_CommandNotFound(t *testing.T) {
+func TestOSCommandRunner_Run_CommandNotAllowed(t *testing.T) {
 	runner := NewOSCommandRunner()
 
 	result := runner.Run(
 		context.Background(),
-		"command-that-does-not-exist",
+		"sh",
+		"-c",
+		"printf 'hello'",
 	)
 
 	if result.ExitCode != -1 {
@@ -60,6 +60,6 @@ func TestOSCommandRunner_Run_CommandNotFound(t *testing.T) {
 	}
 
 	if result.Stderr == "" {
-		t.Fatal("expected stderr to contain command error")
+		t.Fatal("expected stderr to contain command validation error")
 	}
 }

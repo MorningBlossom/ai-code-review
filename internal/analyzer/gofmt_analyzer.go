@@ -56,6 +56,29 @@ func (a *GofmtAnalyzer) Analyze(
 			continue
 		}
 
+		// gofmt -d returns exit code 1 when formatting differences
+		// are found. That is an analyzer finding, not an execution failure.
+		if commandResult.ExitCode == 1 &&
+			strings.TrimSpace(commandResult.Stdout) != "" {
+			result.Findings = append(
+				result.Findings,
+				review.ReviewFinding{
+					FindingID:   fmt.Sprintf("gofmt:%s", sourceFile.Path),
+					Source:      a.Name(),
+					Category:    "style",
+					Severity:    "low",
+					Confidence:  1.0,
+					Title:       "File is not gofmt formatted",
+					Explanation: "The Go source file has formatting differences according to gofmt.",
+					Suggestion:  "Run gofmt on the file before merging.",
+					FilePath:    sourceFile.Path,
+					Evidence:    commandResult.Stdout,
+				},
+			)
+
+			continue
+		}
+
 		if commandResult.ExitCode != 0 {
 			result.Status = "failed"
 			result.Diagnostics = append(
@@ -68,26 +91,6 @@ func (a *GofmtAnalyzer) Analyze(
 			)
 			continue
 		}
-
-		if strings.TrimSpace(commandResult.Stdout) == "" {
-			continue
-		}
-
-		result.Findings = append(
-			result.Findings,
-			review.ReviewFinding{
-				FindingID:   fmt.Sprintf("gofmt:%s", sourceFile.Path),
-				Source:      a.Name(),
-				Category:    "style",
-				Severity:    "low",
-				Confidence:  1.0,
-				Title:       "File is not gofmt formatted",
-				Explanation: "The Go source file has formatting differences according to gofmt.",
-				Suggestion:  "Run gofmt on the file before merging.",
-				FilePath:    sourceFile.Path,
-				Evidence:    commandResult.Stdout,
-			},
-		)
 	}
 
 	return result

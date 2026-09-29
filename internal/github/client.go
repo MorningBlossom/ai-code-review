@@ -204,7 +204,16 @@ func (c *Client) GetChangedFiles(
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			closeErr := resp.Body.Close()
+
+			if closeErr != nil {
+				return nil, fmt.Errorf(
+					"GitHub changed files page %d returned status %d; close response body: %w",
+					page,
+					resp.StatusCode,
+					closeErr,
+				)
+			}
 
 			return nil, fmt.Errorf(
 				"GitHub changed files page %d returned status %d",
@@ -216,13 +225,22 @@ func (c *Client) GetChangedFiles(
 		var files []pullRequestFilesResponse
 
 		err = json.NewDecoder(resp.Body).Decode(&files)
-		resp.Body.Close()
+
+		closeErr := resp.Body.Close()
 
 		if err != nil {
 			return nil, fmt.Errorf(
 				"decode GitHub changed files page %d: %w",
 				page,
 				err,
+			)
+		}
+
+		if closeErr != nil {
+			return nil, fmt.Errorf(
+				"close GitHub changed files page %d response body: %w",
+				page,
+				closeErr,
 			)
 		}
 

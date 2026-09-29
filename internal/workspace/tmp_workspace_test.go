@@ -36,7 +36,6 @@ func TestTempWorkspace_CreatesAndCleansDirectory(t *testing.T) {
 		t.Fatalf("expected workspace directory to be removed")
 	}
 }
-
 func TestTempWorkspace_Run(t *testing.T) {
 	ws, err := NewTempWorkspace()
 	if err != nil {
@@ -44,39 +43,41 @@ func TestTempWorkspace_Run(t *testing.T) {
 	}
 	defer ws.Close()
 
-	filePath := filepath.Join(ws.Root(), "test.txt")
+	if err := os.WriteFile(
+		filepath.Join(ws.Root(), "go.mod"),
+		[]byte("module example.com/test\n\ngo 1.27\n"),
+		0600,
+	); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
 
 	if err := os.WriteFile(
-		filePath,
-		[]byte("hello"),
-		0644,
+		filepath.Join(ws.Root(), "main.go"),
+		[]byte(`package main
+
+func main() {}
+`),
+		0600,
 	); err != nil {
-		t.Fatalf("write test file: %v", err)
+		t.Fatalf("write main.go: %v", err)
 	}
 
 	result := ws.Run(
 		context.Background(),
-		"cat",
-		"test.txt",
+		"go",
+		"test",
+		"./...",
 	)
 
 	if result.ExitCode != 0 {
 		t.Fatalf(
-			"expected exit code 0, got %d; stderr=%q",
+			"expected exit code 0, got %d; stdout=%q; stderr=%q",
 			result.ExitCode,
+			result.Stdout,
 			result.Stderr,
 		)
 	}
-
-	if result.Stdout != "hello" {
-		t.Fatalf(
-			"expected stdout %q, got %q",
-			"hello",
-			result.Stdout,
-		)
-	}
 }
-
 func TestTempWorkspace_RunFailure(t *testing.T) {
 	ws, err := NewTempWorkspace()
 	if err != nil {
@@ -86,23 +87,17 @@ func TestTempWorkspace_RunFailure(t *testing.T) {
 
 	result := ws.Run(
 		context.Background(),
-		"sh",
-		"-c",
-		"printf 'failure' >&2; exit 2",
+		"not-allowed-command",
 	)
 
-	if result.ExitCode != 2 {
+	if result.ExitCode != -1 {
 		t.Fatalf(
-			"expected exit code 2, got %d",
+			"expected exit code -1, got %d",
 			result.ExitCode,
 		)
 	}
 
-	if result.Stderr != "failure" {
-		t.Fatalf(
-			"expected stderr %q, got %q",
-			"failure",
-			result.Stderr,
-		)
+	if result.Stderr == "" {
+		t.Fatal("expected stderr to contain command validation error")
 	}
 }

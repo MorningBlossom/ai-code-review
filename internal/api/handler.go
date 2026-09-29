@@ -58,7 +58,7 @@ func (h Handler) CreateReview(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.orchestrator.Review(r.Context(), request)
 	if err != nil {
-		http.Error(w, "review failed", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 

@@ -76,6 +76,11 @@ func (b *SnapshotBuilder) Build(
 	return ws, nil
 }
 
+const (
+	maxExtractedFileSize = 16 << 20  // 16 MiB
+	maxExtractedSize     = 256 << 20 // 256 MiB
+)
+
 func extractTarGz(
 	archive []byte,
 	destination string,
@@ -89,9 +94,21 @@ func extractTarGz(
 			err,
 		)
 	}
-	defer gzipReader.Close()
 
 	tarReader := tar.NewReader(gzipReader)
+
+	root, err := os.OpenRoot(destination)
+	if err != nil {
+		_ = gzipReader.Close()
+
+		return fmt.Errorf(
+			"open extraction root: %w",
+			err,
+		)
+	}
+	defer root.Close()
+
+	var extractedSize int64
 
 	for {
 		header, err := tarReader.Next()
@@ -107,65 +124,131 @@ func extractTarGz(
 			)
 		}
 
-		target, err := safeArchivePath(
-			destination,
-			header.Name,
-		)
+		archivePath, err := safeArchivePath(header.Name)
 		if err != nil {
 			return err
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(
-				target,
-				0755,
+			if err := root.MkdirAll(
+				archivePath,
+				0700,
 			); err != nil {
-				return err
+				return fmt.Errorf(
+					"create directory %q: %w",
+					header.Name,
+					err,
+				)
 			}
 
 		case tar.TypeReg:
-			if err := os.MkdirAll(
-				filepath.Dir(target),
-				0755,
-			); err != nil {
-				return err
+			if header.Size < 0 {
+				return fmt.Errorf(
+					"invalid file size for %q",
+					header.Name,
+				)
 			}
 
-			file, err := os.OpenFile(
-				target,
+			if header.Size > maxExtractedFileSize {
+				return fmt.Errorf(
+					"file %q exceeds maximum extracted file size",
+					header.Name,
+				)
+			}
+
+			if extractedSize+header.Size > maxExtractedSize {
+				return fmt.Errorf(
+					"repository archive exceeds maximum extracted size",
+				)
+			}
+
+			parent := filepath.Dir(archivePath)
+
+			if parent != "." {
+				if err := root.MkdirAll(
+					parent,
+					0700,
+				); err != nil {
+					return fmt.Errorf(
+						"create parent directory for %q: %w",
+						header.Name,
+						err,
+					)
+				}
+			}
+
+			file, err := root.OpenFile(
+				archivePath,
 				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
-				0644,
+				0600,
 			)
 			if err != nil {
-				return err
+				return fmt.Errorf(
+					"create archive file %q: %w",
+					header.Name,
+					err,
+				)
 			}
 
-			_, copyErr := io.Copy(file, tarReader)
+			written, copyErr := io.Copy(
+				file,
+				io.LimitReader(
+					tarReader,
+					maxExtractedFileSize+1,
+				),
+			)
+
 			closeErr := file.Close()
 
 			if copyErr != nil {
-				return copyErr
+				return fmt.Errorf(
+					"extract file %q: %w",
+					header.Name,
+					copyErr,
+				)
 			}
 
 			if closeErr != nil {
-				return closeErr
+				return fmt.Errorf(
+					"close extracted file %q: %w",
+					header.Name,
+					closeErr,
+				)
 			}
+
+			if written != header.Size {
+				return fmt.Errorf(
+					"unexpected extracted size for %q: expected %d, got %d",
+					header.Name,
+					header.Size,
+					written,
+				)
+			}
+
+			extractedSize += written
 		}
+	}
+
+	if err := gzipReader.Close(); err != nil {
+		return fmt.Errorf(
+			"close gzip reader: %w",
+			err,
+		)
 	}
 
 	return nil
 }
 
-func safeArchivePath(
-	destination string,
-	name string,
-) (string, error) {
+func safeArchivePath(name string) (string, error) {
 	cleanName := filepath.Clean(name)
 
 	if cleanName == "." ||
 		cleanName == ".." ||
-		strings.HasPrefix(cleanName, ".."+string(os.PathSeparator)) ||
+		strings.HasPrefix(
+			cleanName,
+			".."+string(os.PathSeparator),
+		) ||
 		filepath.IsAbs(cleanName) {
 		return "", fmt.Errorf(
 			"unsafe archive path: %s",
@@ -173,12 +256,7 @@ func safeArchivePath(
 		)
 	}
 
-	target := filepath.Join(
-		destination,
-		cleanName,
-	)
-
-	return target, nil
+	return cleanName, nil
 }
 
 func flattenArchiveRoot(root string) error {

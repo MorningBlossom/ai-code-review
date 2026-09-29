@@ -97,7 +97,7 @@ func TestGofmtAnalyzer_FindsFormattingIssue(t *testing.T) {
 	runner := &fakeCommandRunner{
 		results: map[string]CommandResult{
 			"gofmt -d": {
-				ExitCode: 0,
+				ExitCode: 1,
 				Stdout: `diff
 --- a/payment/retry.go
 +++ b/payment/retry.go
@@ -230,7 +230,7 @@ func TestGofmtAnalyzer_CommandFailure(t *testing.T) {
 	runner := &fakeCommandRunner{
 		results: map[string]CommandResult{
 			"gofmt -d": {
-				ExitCode: 1,
+				ExitCode: -1,
 				Stderr:   "gofmt: command failed",
 			},
 		},

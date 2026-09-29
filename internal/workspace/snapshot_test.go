@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/MorningBlossom/ai-code-review/internal/github"
@@ -31,45 +33,35 @@ func TestSnapshotBuilder_Build(t *testing.T) {
 	}
 	defer ws.Close()
 
-	result := ws.Run(
-		context.Background(),
-		"cat",
-		"go.mod",
-	)
+	goModPath := filepath.Join(ws.Root(), "go.mod")
 
-	if result.ExitCode != 0 {
-		t.Fatalf(
-			"expected exit code 0, got %d; stderr=%q",
-			result.ExitCode,
-			result.Stderr,
-		)
+	goMod, err := os.ReadFile(goModPath)
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
 	}
 
-	if result.Stdout != "module example.com/test\n" {
+	if string(goMod) != "module example.com/test\n" {
 		t.Fatalf(
 			"unexpected go.mod content: %q",
-			result.Stdout,
+			string(goMod),
 		)
 	}
 
-	result = ws.Run(
-		context.Background(),
-		"cat",
-		"payment/retry.go",
+	retryPath := filepath.Join(
+		ws.Root(),
+		"payment",
+		"retry.go",
 	)
 
-	if result.ExitCode != 0 {
-		t.Fatalf(
-			"expected exit code 0, got %d; stderr=%q",
-			result.ExitCode,
-			result.Stderr,
-		)
+	retrySource, err := os.ReadFile(retryPath)
+	if err != nil {
+		t.Fatalf("read payment/retry.go: %v", err)
 	}
 
-	if result.Stdout != "package payment\n" {
+	if string(retrySource) != "package payment\n" {
 		t.Fatalf(
 			"unexpected source content: %q",
-			result.Stdout,
+			string(retrySource),
 		)
 	}
 }
@@ -90,7 +82,7 @@ func createTestArchive(t *testing.T) []byte {
 	for path, content := range files {
 		err := tarWriter.WriteHeader(&tar.Header{
 			Name: path,
-			Mode: 0644,
+			Mode: 0600,
 			Size: int64(len(content)),
 		})
 		if err != nil {

@@ -1,8 +1,8 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 )
@@ -31,20 +31,20 @@ func (w *TempWorkspace) Run(
 	name string,
 	args ...string,
 ) CommandResult {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd, err := newAllowedWorkspaceCommand(ctx, name, args...)
+	if err != nil {
+		return CommandResult{
+			ExitCode: -1,
+			Stderr:   err.Error(),
+		}
+	}
+
 	cmd.Dir = w.root
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	stdout, err := cmd.Output()
 
 	result := CommandResult{
-		Stdout: stdout.String(),
-		Stderr: stderr.String(),
+		Stdout: string(stdout),
 	}
 
 	if err == nil {
@@ -54,6 +54,7 @@ func (w *TempWorkspace) Run(
 
 	if exitError, ok := err.(*exec.ExitError); ok {
 		result.ExitCode = exitError.ExitCode()
+		result.Stderr = string(exitError.Stderr)
 		return result
 	}
 
@@ -65,4 +66,53 @@ func (w *TempWorkspace) Run(
 
 func (w *TempWorkspace) Close() error {
 	return os.RemoveAll(w.root)
+}
+
+func newAllowedWorkspaceCommand(
+	ctx context.Context,
+	name string,
+	args ...string,
+) (*exec.Cmd, error) {
+	switch {
+	case name == "go" &&
+		len(args) == 2 &&
+		args[0] == "vet" &&
+		args[1] == "./...":
+		return exec.CommandContext(ctx, "go", "vet", "./..."), nil
+
+	case name == "go" &&
+		len(args) == 2 &&
+		args[0] == "test" &&
+		args[1] == "./...":
+		return exec.CommandContext(ctx, "go", "test", "./..."), nil
+
+	case name == "go" &&
+		len(args) == 3 &&
+		args[0] == "test" &&
+		args[1] == "-race" &&
+		args[2] == "./...":
+		return exec.CommandContext(ctx, "go", "test", "-race", "./..."), nil
+
+	case name == "staticcheck" &&
+		len(args) == 1 &&
+		args[0] == "./...":
+		return exec.CommandContext(ctx, "staticcheck", "./..."), nil
+
+	case name == "gosec" &&
+		len(args) == 1 &&
+		args[0] == "./...":
+		return exec.CommandContext(ctx, "gosec", "./..."), nil
+
+	case name == "govulncheck" &&
+		len(args) == 1 &&
+		args[0] == "./...":
+		return exec.CommandContext(ctx, "govulncheck", "./..."), nil
+
+	default:
+		return nil, fmt.Errorf(
+			"workspace command %q with arguments %v is not allowed",
+			name,
+			args,
+		)
+	}
 }

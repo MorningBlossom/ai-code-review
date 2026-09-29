@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/MorningBlossom/ai-code-review/config"
 	"github.com/MorningBlossom/ai-code-review/internal/analyzer"
@@ -18,56 +19,75 @@ import (
 
 func main() {
 
-	cfg := config.Load()
+	appConfig := config.Load()
 
-	if cfg.GitHubWebhookSecret == "" {
-		log.Fatal("GITHUB_WEBHOOK_SECRET is required")
-	}
+	var githubClient github.Provider
 
-	if cfg.GitHubAppID == 0 {
-		log.Fatal("GITHUB_APP_ID is required")
-	}
+	if appConfig.AppEnv == "development" {
+		archive, err := github.NewFakeRepositoryArchive()
+		if err != nil {
+			log.Fatalf("create fake repository archive: %v", err)
+		}
 
-	if cfg.GitHubPrivateKeyPath == "" {
-		log.Fatal("GITHUB_PRIVATE_KEY_PATH is required")
-	}
+		githubClient = &github.FakeProvider{
+			Archive: archive,
+		}
+	} else {
+		if appConfig.GitHubWebhookSecret == "" {
+			log.Fatal("GITHUB_WEBHOOK_SECRET is required")
+		}
 
-	appAuthenticator, err := github.NewGitHubAppAuthenticator(
-		github.AppConfig{
-			AppID:          cfg.GitHubAppID,
-			PrivateKeyPath: cfg.GitHubPrivateKeyPath,
-		},
-	)
-	if err != nil {
-		log.Fatalf("create GitHub App authenticator: %v", err)
+		if appConfig.GitHubAppID == 0 {
+			log.Fatal("GITHUB_APP_ID is required")
+		}
+
+		if appConfig.GitHubPrivateKeyPath == "" {
+			log.Fatal("GITHUB_PRIVATE_KEY_PATH is required")
+		}
+
+		appAuthenticator, err := github.NewGitHubAppAuthenticator(
+			github.AppConfig{
+				AppID:          appConfig.GitHubAppID,
+				PrivateKeyPath: appConfig.GitHubPrivateKeyPath,
+			},
+		)
+		if err != nil {
+			log.Fatalf("create GitHub App authenticator: %v", err)
+		}
+
+		githubClient = github.NewClient(
+			http.DefaultClient,
+			appAuthenticator,
+			"https://api.github.com",
+		)
 	}
 
 	commandRunner := analyzer.NewOSCommandRunner()
 
 	analyzers := []analyzer.Analyzer{
 		analyzer.NewGofmtAnalyzer(commandRunner),
-		analyzer.NewGoVetAnalyzer(),
-		analyzer.NewGoTestAnalyzer(),
-		analyzer.NewGosecAnalyzer(),
 	}
 
 	workspaceAnalyzers := []analyzer.WorkspaceAnalyzer{
 		analyzer.NewGoVetAnalyzer(),
 		analyzer.NewGoTestAnalyzer(),
 		analyzer.NewStaticcheckAnalyzer(),
+		analyzer.NewGosecAnalyzer(),
+		analyzer.NewGovulncheckAnalyzer(),
+		analyzer.NewGoRaceAnalyzer(),
 	}
 
-	fakeModel := &model.FakeModelProvider{}
+	modelProvider := model.NewLocalProvider(
+		model.Config{
+			BaseURL:        appConfig.ModelBaseURL,
+			Model:          appConfig.ModelName,
+			TimeoutSeconds: appConfig.ModelTimeoutSeconds,
+		},
+	)
 
 	fakeValidator := &validator.FakeValidator{}
 
 	fakePublisher := &publisher.FakePublisher{}
-
-	githubClient := github.NewClient(
-		http.DefaultClient,
-		appAuthenticator,
-		"https://api.github.com",
-	)
 
 	deliveryStore := api.NewDeliveryStore()
 
@@ -88,22 +108,35 @@ func main() {
 		workspaceBuilder,
 		analyzers,
 		workspaceAnalyzers,
-		fakeModel,
+		modelProvider,
 		fakeValidator,
 		fakePublisher,
 	)
 
-	githubWebhookHandler := api.NewGithubWebhookHandler(reviewOrchestrator, cfg.GitHubWebhookSecret, deliveryStore)
+	githubWebhookHandler := api.NewGithubWebhookHandler(reviewOrchestrator, appConfig.GitHubWebhookSecret, deliveryStore)
 
 	handler := api.NewHandler(reviewOrchestrator)
+
+	// routes
 	http.HandleFunc("/health", handler.Health)
 	http.HandleFunc(
 		"/github/webhook",
 		githubWebhookHandler.HandleWebhook,
 	)
 	http.HandleFunc("/reviews", handler.CreateReview)
+
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           nil,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
 	log.Println("review API listening on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
