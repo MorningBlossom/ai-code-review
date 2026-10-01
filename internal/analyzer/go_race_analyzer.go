@@ -82,17 +82,19 @@ func (a *GoRaceAnalyzer) AnalyzeWorkspace(
 		)
 	}
 
-	result.Findings = []review.ReviewFinding{
-		{
-			Source:      "go-race",
-			Category:    "concurrency",
-			Severity:    "high",
-			Confidence:  1,
-			Title:       "Go race detector reported a data race",
-			Explanation: "The Go race detector found a potential data race while running the test suite.",
-			Suggestion:  "Protect shared state with appropriate synchronization such as mutexes, channels, or atomic operations.",
-			Evidence:    output,
-		},
+	if strings.Contains(output, "WARNING: DATA RACE") {
+		result.Findings = []review.ReviewFinding{
+			{
+				Source:      "go-race",
+				Category:    "concurrency",
+				Severity:    "high",
+				Confidence:  1,
+				Title:       "Go race detector reported a data race",
+				Explanation: "The Go race detector found a potential data race while running the test suite.",
+				Suggestion:  "Protect shared state with appropriate synchronization such as mutexes, channels, or atomic operations.",
+				Evidence:    output,
+			},
+		}
 	}
 
 	return result

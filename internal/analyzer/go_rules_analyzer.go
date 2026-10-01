@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -83,17 +84,28 @@ func (a *GoRulesAnalyzer) AnalyzeWorkspace(
 	ws workspace.Workspace,
 ) review.AnalyzerResult {
 	start := time.Now()
-
 	result := review.AnalyzerResult{
 		AnalyzerName:    a.Name(),
 		AnalyzerVersion: "1.0.0",
 		Status:          "completed",
 	}
 
-	root := ws.Root()
+	rootPath := ws.Root()
 
-	err := filepath.WalkDir(
-		root,
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		result.Status = "failed"
+		result.Diagnostics = append(
+			result.Diagnostics,
+			fmt.Sprintf("failed to open workspace root %s: %v", rootPath, err),
+		)
+		result.DurationMillis = time.Since(start).Milliseconds()
+		return result
+	}
+	defer root.Close()
+
+	err = filepath.WalkDir(
+		rootPath,
 		func(path string, entry os.DirEntry, walkErr error) error {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -102,11 +114,7 @@ func (a *GoRulesAnalyzer) AnalyzeWorkspace(
 			if walkErr != nil {
 				result.Diagnostics = append(
 					result.Diagnostics,
-					fmt.Sprintf(
-						"failed to inspect %s: %v",
-						path,
-						walkErr,
-					),
+					fmt.Sprintf("failed to inspect %s: %v", path, walkErr),
 				)
 				return nil
 			}
@@ -115,7 +123,6 @@ func (a *GoRulesAnalyzer) AnalyzeWorkspace(
 				if shouldSkipDirectory(entry.Name()) {
 					return filepath.SkipDir
 				}
-
 				return nil
 			}
 
@@ -123,28 +130,39 @@ func (a *GoRulesAnalyzer) AnalyzeWorkspace(
 				return nil
 			}
 
-			content, err := os.ReadFile(path)
+			relativePath, err := filepath.Rel(rootPath, path)
 			if err != nil {
 				result.Diagnostics = append(
 					result.Diagnostics,
-					fmt.Sprintf(
-						"failed to read %s: %v",
-						path,
-						err,
-					),
+					fmt.Sprintf("failed to determine relative path for %s: %v", path, err),
 				)
 				return nil
 			}
 
-			relativePath, err := filepath.Rel(root, path)
+			file, err := root.Open(relativePath)
 			if err != nil {
 				result.Diagnostics = append(
 					result.Diagnostics,
-					fmt.Sprintf(
-						"failed to determine relative path for %s: %v",
-						path,
-						err,
-					),
+					fmt.Sprintf("failed to read %s: %v", relativePath, err),
+				)
+				return nil
+			}
+
+			content, err := io.ReadAll(file)
+			closeErr := file.Close()
+
+			if err != nil {
+				result.Diagnostics = append(
+					result.Diagnostics,
+					fmt.Sprintf("failed to read %s: %v", relativePath, err),
+				)
+				return nil
+			}
+
+			if closeErr != nil {
+				result.Diagnostics = append(
+					result.Diagnostics,
+					fmt.Sprintf("failed to close %s: %v", relativePath, closeErr),
 				)
 				return nil
 			}
@@ -154,15 +172,8 @@ func (a *GoRulesAnalyzer) AnalyzeWorkspace(
 				string(content),
 			)
 
-			result.Findings = append(
-				result.Findings,
-				findings...,
-			)
-
-			result.Diagnostics = append(
-				result.Diagnostics,
-				diagnostics...,
-			)
+			result.Findings = append(result.Findings, findings...)
+			result.Diagnostics = append(result.Diagnostics, diagnostics...)
 
 			return nil
 		},
@@ -185,7 +196,6 @@ func (a *GoRulesAnalyzer) AnalyzeWorkspace(
 	}
 
 	result.DurationMillis = time.Since(start).Milliseconds()
-
 	return result
 }
 

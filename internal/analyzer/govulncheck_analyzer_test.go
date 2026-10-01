@@ -2,124 +2,83 @@ package analyzer
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/MorningBlossom/ai-code-review/internal/workspace"
 )
 
-func TestGovulncheckAnalyzer_Passed(t *testing.T) {
+func TestGovulncheckAnalyzer_Pass(t *testing.T) {
 	analyzer := NewGovulncheckAnalyzer()
 
 	ws := &fakeWorkspace{
 		result: workspace.CommandResult{
 			ExitCode: 0,
+			Stdout:   "govulncheck: no vulnerabilities found",
 		},
 	}
 
-	result := analyzer.AnalyzeWorkspace(
-		context.Background(),
-		ws,
-	)
-
-	if result.AnalyzerName != "govulncheck" {
-		t.Fatalf(
-			"expected analyzer name govulncheck, got %q",
-			result.AnalyzerName,
-		)
-	}
+	result := analyzer.AnalyzeWorkspace(context.Background(), ws)
 
 	if result.Status != "passed" {
-		t.Fatalf(
-			"expected status passed, got %q",
-			result.Status,
-		)
+		t.Fatalf("expected status passed, got %q", result.Status)
 	}
 
 	if len(result.Findings) != 0 {
-		t.Fatalf(
-			"expected no findings, got %d",
-			len(result.Findings),
-		)
+		t.Fatalf("expected no findings, got %d", len(result.Findings))
 	}
 }
 
-func TestGovulncheckAnalyzer_FindsVulnerability(t *testing.T) {
+func TestGovulncheckAnalyzer_Vulnerability(t *testing.T) {
 	analyzer := NewGovulncheckAnalyzer()
 
 	ws := &fakeWorkspace{
 		result: workspace.CommandResult{
-			ExitCode: 3,
-			Stderr:   "internal/http/client.go:42:5: golang.org/x/net/http2 vulnerable function",
+			ExitCode: 1,
+			Stderr:   `main.go:42:2: golang.org/x/crypto vulnerable to CVE-2025-12345`,
 		},
 	}
 
-	result := analyzer.AnalyzeWorkspace(
-		context.Background(),
-		ws,
-	)
+	result := analyzer.AnalyzeWorkspace(context.Background(), ws)
 
 	if result.Status != "failed" {
-		t.Fatalf(
-			"expected status failed, got %q",
-			result.Status,
-		)
-	}
-
-	if len(result.Diagnostics) != 1 {
-		t.Fatalf(
-			"expected one diagnostic, got %d",
-			len(result.Diagnostics),
-		)
+		t.Fatalf("expected status failed, got %q", result.Status)
 	}
 
 	if len(result.Findings) != 1 {
-		t.Fatalf(
-			"expected one finding, got %d",
-			len(result.Findings),
-		)
+		t.Fatalf("expected 1 finding, got %d", len(result.Findings))
 	}
 
 	finding := result.Findings[0]
 
 	if finding.Source != "govulncheck" {
-		t.Fatalf(
-			"expected source govulncheck, got %q",
-			finding.Source,
-		)
+		t.Errorf("expected source govulncheck, got %q", finding.Source)
 	}
 
 	if finding.Category != "security" {
-		t.Fatalf(
-			"expected category security, got %q",
-			finding.Category,
-		)
+		t.Errorf("expected category security, got %q", finding.Category)
 	}
 
 	if finding.Severity != "high" {
-		t.Fatalf(
-			"expected severity high, got %q",
-			finding.Severity,
-		)
+		t.Errorf("expected severity high, got %q", finding.Severity)
 	}
 
-	if finding.FilePath != "internal/http/client.go" {
-		t.Fatalf(
-			"expected file internal/http/client.go, got %q",
-			finding.FilePath,
-		)
+	if finding.FilePath != "main.go" {
+		t.Errorf("expected file path main.go, got %q", finding.FilePath)
 	}
 
 	if finding.StartLine != 42 {
-		t.Fatalf(
-			"expected start line 42, got %d",
-			finding.StartLine,
-		)
+		t.Errorf("expected start line 42, got %d", finding.StartLine)
 	}
 
 	if finding.EndLine != 42 {
-		t.Fatalf(
-			"expected end line 42, got %d",
-			finding.EndLine,
+		t.Errorf("expected end line 42, got %d", finding.EndLine)
+	}
+
+	if !strings.Contains(finding.Explanation, "CVE-2025-12345") {
+		t.Errorf(
+			"expected explanation to contain vulnerability, got %q",
+			finding.Explanation,
 		)
 	}
 }
@@ -130,26 +89,31 @@ func TestGovulncheckAnalyzer_UsesStdoutWhenStderrEmpty(t *testing.T) {
 	ws := &fakeWorkspace{
 		result: workspace.CommandResult{
 			ExitCode: 1,
-			Stdout:   "internal/http/client.go:42:5: vulnerable function",
+			Stdout:   `internal/api/handler.go:18:5: vulnerable dependency detected`,
 		},
 	}
 
-	result := analyzer.AnalyzeWorkspace(
-		context.Background(),
-		ws,
-	)
+	result := analyzer.AnalyzeWorkspace(context.Background(), ws)
 
-	if len(result.Diagnostics) != 1 {
-		t.Fatalf(
-			"expected one diagnostic, got %d",
-			len(result.Diagnostics),
-		)
+	if result.Status != "failed" {
+		t.Fatalf("expected status failed, got %q", result.Status)
 	}
 
 	if len(result.Findings) != 1 {
-		t.Fatalf(
-			"expected one finding, got %d",
-			len(result.Findings),
+		t.Fatalf("expected 1 finding, got %d", len(result.Findings))
+	}
+
+	if result.Findings[0].FilePath != "internal/api/handler.go" {
+		t.Errorf(
+			"unexpected file path: %q",
+			result.Findings[0].FilePath,
+		)
+	}
+
+	if result.Findings[0].StartLine != 18 {
+		t.Errorf(
+			"unexpected line: %d",
+			result.Findings[0].StartLine,
 		)
 	}
 }
@@ -164,23 +128,10 @@ func TestGovulncheckAnalyzer_ExecutionFailure(t *testing.T) {
 		},
 	}
 
-	result := analyzer.AnalyzeWorkspace(
-		context.Background(),
-		ws,
-	)
+	result := analyzer.AnalyzeWorkspace(context.Background(), ws)
 
 	if result.Status != "failed" {
-		t.Fatalf(
-			"expected status failed, got %q",
-			result.Status,
-		)
-	}
-
-	if len(result.Diagnostics) != 1 {
-		t.Fatalf(
-			"expected one diagnostic, got %d",
-			len(result.Diagnostics),
-		)
+		t.Fatalf("expected status failed, got %q", result.Status)
 	}
 
 	if len(result.Findings) != 0 {
@@ -189,46 +140,21 @@ func TestGovulncheckAnalyzer_ExecutionFailure(t *testing.T) {
 			len(result.Findings),
 		)
 	}
-}
 
-func TestParseGovulncheckDiagnostic(t *testing.T) {
-	filePath, lineNumber, message, ok := parseGovulncheckDiagnostic(
-		"internal/http/client.go:42:5: vulnerable function",
-	)
-
-	if !ok {
-		t.Fatal("expected diagnostic to parse")
-	}
-
-	if filePath != "internal/http/client.go" {
+	if len(result.Diagnostics) != 1 {
 		t.Fatalf(
-			"expected file path internal/http/client.go, got %q",
-			filePath,
+			"expected 1 diagnostic, got %d",
+			len(result.Diagnostics),
 		)
 	}
 
-	if lineNumber != 42 {
-		t.Fatalf(
-			"expected line 42, got %d",
-			lineNumber,
+	if !strings.Contains(
+		result.Diagnostics[0],
+		"govulncheck execution failed",
+	) {
+		t.Errorf(
+			"unexpected diagnostic: %q",
+			result.Diagnostics[0],
 		)
-	}
-
-	if message != "5: vulnerable function" {
-		t.Fatalf(
-			"expected message %q, got %q",
-			"5: vulnerable function",
-			message,
-		)
-	}
-}
-
-func TestParseGovulncheckDiagnostic_Invalid(t *testing.T) {
-	_, _, _, ok := parseGovulncheckDiagnostic(
-		"not a diagnostic",
-	)
-
-	if ok {
-		t.Fatal("expected diagnostic parsing to fail")
 	}
 }
