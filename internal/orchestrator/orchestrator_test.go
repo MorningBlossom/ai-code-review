@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,66 @@ import (
 	"github.com/MorningBlossom/ai-code-review/internal/review"
 	"github.com/MorningBlossom/ai-code-review/internal/workspace"
 )
+
+type failingGitHubProvider struct {
+	err error
+}
+
+func (p *failingGitHubProvider) GetPullRequest(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	pullRequestNumber int,
+) (github.PullRequest, error) {
+	return github.PullRequest{}, p.err
+}
+
+func (p *failingGitHubProvider) GetChangedFiles(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	pullRequestNumber int,
+) ([]review.ChangedFile, error) {
+	return nil, p.err
+}
+
+func (p *failingGitHubProvider) GetFileContent(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+	path string,
+) (string, error) {
+	return "", p.err
+}
+
+func (p *failingGitHubProvider) DownloadRepositoryArchive(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+) ([]byte, error) {
+	return nil, p.err
+}
+
+type failingModelProvider struct {
+	err error
+}
+
+func (m *failingModelProvider) Name() string {
+	return "failing-model"
+}
+
+func (m *failingModelProvider) Review(
+	ctx context.Context,
+	reviewContext review.ReviewContext,
+) ([]review.ReviewFinding, error) {
+	return nil, m.err
+}
 
 type fakeModelProvider struct {
 	calls         int
@@ -155,6 +217,7 @@ func (f *fakeGitHubProvider) DownloadRepositoryArchive(
 type fakeValidator struct {
 	calls             int
 	contextCalls      int
+	err               error
 	lastReviewContext review.ReviewContext
 }
 
@@ -168,34 +231,45 @@ func (f *fakeValidator) Validate(
 	return findings, nil
 }
 
-func (f *fakeValidator) ValidateWithContext(
+func (v *fakeValidator) ValidateWithContext(
 	ctx context.Context,
 	request review.ReviewRequest,
 	reviewContext review.ReviewContext,
 	findings []review.ReviewFinding,
 ) ([]review.ReviewFinding, error) {
-	f.contextCalls++
-	f.lastReviewContext = reviewContext
+	v.contextCalls++
+
+	if v.err != nil {
+		return nil, v.err
+	}
+
+	v.lastReviewContext = reviewContext
 
 	return findings, nil
 }
 
 type fakePublisher struct {
 	calls int
+	err   error
 }
 
-func (f *fakePublisher) Publish(
+func (p *fakePublisher) Publish(
 	ctx context.Context,
 	request review.ReviewRequest,
 	result review.ReviewResult,
 ) error {
-	f.calls++
+	p.calls++
+
+	if p.err != nil {
+		return p.err
+	}
 
 	return nil
 }
 
 type fakeWorkspaceBuilder struct {
 	calls int
+	err   error
 }
 
 func (f *fakeWorkspaceBuilder) Build(
@@ -206,6 +280,10 @@ func (f *fakeWorkspaceBuilder) Build(
 	ref string,
 ) (*workspace.TempWorkspace, error) {
 	f.calls++
+
+	if f.err != nil {
+		return nil, f.err
+	}
 
 	return workspace.NewTempWorkspace()
 }
@@ -578,6 +656,729 @@ func TestReviewOrchestrator_PassesAnalyzerFindingsToModel(
 		t.Fatalf(
 			"expected 1 result finding, got %d",
 			len(result.Findings),
+		)
+	}
+}
+
+func TestReviewOrchestrator_FailsWhenModelFails(t *testing.T) {
+	githubProvider := &fakeGitHubProvider{}
+	findingValidator := &fakeValidator{}
+	reviewPublisher := &fakePublisher{}
+	workspaceBuilder := &fakeWorkspaceBuilder{}
+
+	contextBuilder := contextbuilder.NewBuilder(
+		githubProvider,
+		20,
+		200_000,
+		50_000,
+	)
+
+	modelProvider := &failingModelProvider{
+		err: errors.New("model provider failed"),
+	}
+
+	orchestrator := NewOrchestrator(
+		githubProvider,
+		contextBuilder,
+		workspaceBuilder,
+		nil,
+		nil,
+		modelProvider,
+		findingValidator,
+		reviewPublisher,
+	)
+
+	request := review.ReviewRequest{
+		ReviewID:          "review-model-failure",
+		InstallationID:    123,
+		Organization:      "MorningBlossom",
+		Repository:        "test-repository",
+		PullRequestNumber: 1,
+		BaseSHA:           "base-sha",
+		HeadSHA:           "head-sha",
+		RequestedAt:       time.Now(),
+	}
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		request,
+	)
+
+	if err == nil {
+		t.Fatal("expected model failure error")
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf(
+			"expected failed status, got %q",
+			result.Status,
+		)
+	}
+
+	if !strings.Contains(err.Error(), "model provider failed") {
+		t.Fatalf(
+			"expected model failure error, got %v",
+			err,
+		)
+	}
+
+	if findingValidator.contextCalls != 0 {
+		t.Fatalf(
+			"expected validator not to be called, got %d calls",
+			findingValidator.contextCalls,
+		)
+	}
+
+	if reviewPublisher.calls != 0 {
+		t.Fatalf(
+			"expected publisher not to be called, got %d calls",
+			reviewPublisher.calls,
+		)
+	}
+}
+
+func TestReviewOrchestrator_FailsWhenGetPullRequestFails(t *testing.T) {
+	expectedErr := errors.New("github pull request failed")
+
+	githubProvider := &failingGitHubProvider{
+		err: expectedErr,
+	}
+
+	modelProvider := &fakeModelProvider{}
+	findingValidator := &fakeValidator{}
+	reviewPublisher := &fakePublisher{}
+
+	orchestrator := NewOrchestrator(
+		githubProvider,
+		contextbuilder.NewBuilder(
+			githubProvider,
+			10,        // maxFiles
+			1_000_000, // maxBytes
+			100_000,   // maxTokens
+		),
+		nil,
+		nil,
+		nil,
+		modelProvider,
+		findingValidator,
+		reviewPublisher,
+	)
+
+	request := review.ReviewRequest{
+		ReviewID:          "review-github-failure",
+		InstallationID:    123,
+		Organization:      "MorningBlossom",
+		Repository:        "test-repo",
+		PullRequestNumber: 42,
+		BaseSHA:           "base-sha",
+		HeadSHA:           "head-sha",
+	}
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		request,
+	)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "get pull request") {
+		t.Fatalf("expected get pull request error, got %v", err)
+	}
+
+	if !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected underlying GitHub error, got %v", err)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("expected status failed, got %q", result.Status)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected one result error, got %d", len(result.Errors))
+	}
+
+	if modelProvider.calls != 0 {
+		t.Fatalf("expected model not to be called, got %d calls", modelProvider.calls)
+	}
+
+	if findingValidator.calls != 0 {
+		t.Fatalf("expected validator not to be called, got %d calls", findingValidator.calls)
+	}
+
+	if reviewPublisher.calls != 0 {
+		t.Fatalf("expected publisher not to be called, got %d calls", reviewPublisher.calls)
+	}
+}
+
+type changedFilesFailingGitHubProvider struct {
+	err error
+}
+
+func (p *changedFilesFailingGitHubProvider) GetPullRequest(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	pullRequestNumber int,
+) (github.PullRequest, error) {
+	return github.PullRequest{
+		Number:  pullRequestNumber,
+		Title:   "Test PR",
+		Body:    "Test body",
+		BaseSHA: "base-sha",
+		HeadSHA: "head-sha",
+		Author:  "test-user",
+	}, nil
+}
+
+func (p *changedFilesFailingGitHubProvider) GetChangedFiles(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	pullRequestNumber int,
+) ([]review.ChangedFile, error) {
+	return nil, p.err
+}
+
+func (p *changedFilesFailingGitHubProvider) GetFileContent(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+	path string,
+) (string, error) {
+	return "", p.err
+}
+
+func (p *changedFilesFailingGitHubProvider) DownloadRepositoryArchive(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+) ([]byte, error) {
+	return nil, p.err
+}
+
+func TestReviewOrchestrator_FailsWhenGetChangedFilesFails(t *testing.T) {
+	expectedErr := errors.New("github changed files failed")
+
+	githubProvider := &changedFilesFailingGitHubProvider{
+		err: expectedErr,
+	}
+
+	modelProvider := &fakeModelProvider{}
+	findingValidator := &fakeValidator{}
+	reviewPublisher := &fakePublisher{}
+
+	orchestrator := NewOrchestrator(
+		githubProvider,
+		contextbuilder.NewBuilder(
+			githubProvider,
+			10,
+			1_000_000,
+			100_000,
+		),
+		nil,
+		nil,
+		nil,
+		modelProvider,
+		findingValidator,
+		reviewPublisher,
+	)
+
+	request := review.ReviewRequest{
+		ReviewID:          "review-changed-files-failure",
+		InstallationID:    123,
+		Organization:      "MorningBlossom",
+		Repository:        "test-repo",
+		PullRequestNumber: 42,
+		BaseSHA:           "base-sha",
+		HeadSHA:           "head-sha",
+	}
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		request,
+	)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "get changed files") {
+		t.Fatalf("expected get changed files error, got %v", err)
+	}
+
+	if !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected underlying GitHub error, got %v", err)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("expected status failed, got %q", result.Status)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected one result error, got %d", len(result.Errors))
+	}
+
+	if modelProvider.calls != 0 {
+		t.Fatalf("expected model not to be called, got %d calls", modelProvider.calls)
+	}
+
+	if findingValidator.calls != 0 {
+		t.Fatalf("expected validator not to be called, got %d calls", findingValidator.calls)
+	}
+
+	if reviewPublisher.calls != 0 {
+		t.Fatalf("expected publisher not to be called, got %d calls", reviewPublisher.calls)
+	}
+}
+
+type contextBuildFailingGitHubProvider struct {
+	err error
+}
+
+func (p *contextBuildFailingGitHubProvider) GetPullRequest(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	pullRequestNumber int,
+) (github.PullRequest, error) {
+	return github.PullRequest{
+		Number:  pullRequestNumber,
+		Title:   "Test PR",
+		Body:    "Test body",
+		BaseSHA: "base-sha",
+		HeadSHA: "head-sha",
+		Author:  "test-user",
+	}, nil
+}
+
+func (p *contextBuildFailingGitHubProvider) GetChangedFiles(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	pullRequestNumber int,
+) ([]review.ChangedFile, error) {
+	return []review.ChangedFile{
+		{
+			Path:   "internal/example.go",
+			Status: "modified",
+		},
+	}, nil
+}
+
+func (p *contextBuildFailingGitHubProvider) GetFileContent(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+	path string,
+) (string, error) {
+	return "", p.err
+}
+
+func (p *contextBuildFailingGitHubProvider) DownloadRepositoryArchive(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+) ([]byte, error) {
+	return nil, p.err
+}
+
+func TestReviewOrchestrator_FailsWhenContextBuildFails(t *testing.T) {
+	expectedErr := errors.New("github source file failed")
+
+	githubProvider := &contextBuildFailingGitHubProvider{
+		err: expectedErr,
+	}
+
+	modelProvider := &fakeModelProvider{}
+	findingValidator := &fakeValidator{}
+	reviewPublisher := &fakePublisher{}
+
+	orchestrator := NewOrchestrator(
+		githubProvider,
+		contextbuilder.NewBuilder(
+			githubProvider,
+			10,
+			1_000_000,
+			100_000,
+		),
+		nil,
+		nil,
+		nil,
+		modelProvider,
+		findingValidator,
+		reviewPublisher,
+	)
+
+	request := review.ReviewRequest{
+		ReviewID:          "review-context-build-failure",
+		InstallationID:    123,
+		Organization:      "MorningBlossom",
+		Repository:        "test-repo",
+		PullRequestNumber: 42,
+		BaseSHA:           "base-sha",
+		HeadSHA:           "head-sha",
+	}
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		request,
+	)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "build review context") {
+		t.Fatalf("expected build review context error, got %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "get source file internal/example.go") {
+		t.Fatalf("expected source file error, got %v", err)
+	}
+
+	if !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected underlying GitHub error, got %v", err)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("expected status failed, got %q", result.Status)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected one result error, got %d", len(result.Errors))
+	}
+
+	if modelProvider.calls != 0 {
+		t.Fatalf("expected model not to be called, got %d calls", modelProvider.calls)
+	}
+
+	if findingValidator.calls != 0 {
+		t.Fatalf("expected validator not to be called, got %d calls", findingValidator.calls)
+	}
+
+	if reviewPublisher.calls != 0 {
+		t.Fatalf("expected publisher not to be called, got %d calls", reviewPublisher.calls)
+	}
+}
+
+type failingValidator struct {
+	err error
+}
+
+func (v *failingValidator) Validate(
+	ctx context.Context,
+	findings []review.ReviewFinding,
+) ([]review.ReviewFinding, error) {
+	return nil, v.err
+}
+
+func (v *failingValidator) ValidateWithContext(
+	ctx context.Context,
+	request review.ReviewRequest,
+	reviewContext review.ReviewContext,
+	findings []review.ReviewFinding,
+) ([]review.ReviewFinding, error) {
+	return nil, v.err
+}
+
+func TestReviewOrchestrator_FailsWhenValidatorFails(t *testing.T) {
+	expectedErr := errors.New("finding validation failed")
+
+	githubProvider := &fakeGitHubProvider{}
+
+	modelProvider := &fakeModelProvider{}
+
+	findingValidator := &fakeValidator{
+		err: expectedErr,
+	}
+
+	reviewPublisher := &fakePublisher{}
+
+	orchestrator := NewOrchestrator(
+		githubProvider,
+		contextbuilder.NewBuilder(
+			githubProvider,
+			10,
+			1_000_000,
+			100_000,
+		),
+		nil,
+		nil,
+		nil,
+		modelProvider,
+		findingValidator,
+		reviewPublisher,
+	)
+
+	request := review.ReviewRequest{
+		ReviewID:          "review-validator-failure",
+		InstallationID:    123,
+		Organization:      "MorningBlossom",
+		Repository:        "test-repo",
+		PullRequestNumber: 42,
+		BaseSHA:           "base-sha",
+		HeadSHA:           "head-sha",
+	}
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		request,
+	)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "validate findings") {
+		t.Fatalf("expected validate findings error, got %v", err)
+	}
+
+	if !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected underlying validator error, got %v", err)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("expected status failed, got %q", result.Status)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected one result error, got %d", len(result.Errors))
+	}
+
+	if modelProvider.calls != 1 {
+		t.Fatalf("expected model to be called once, got %d calls", modelProvider.calls)
+	}
+
+	if reviewPublisher.calls != 0 {
+		t.Fatalf("expected publisher not to be called, got %d calls", reviewPublisher.calls)
+	}
+}
+
+func TestReviewOrchestrator_FailsWhenPublisherFails(t *testing.T) {
+	expectedErr := errors.New("publisher failed")
+
+	githubProvider := &fakeGitHubProvider{}
+
+	modelProvider := &fakeModelProvider{}
+
+	findingValidator := &fakeValidator{}
+
+	reviewPublisher := &fakePublisher{
+		err: expectedErr,
+	}
+
+	orchestrator := NewOrchestrator(
+		githubProvider,
+		contextbuilder.NewBuilder(
+			githubProvider,
+			10,
+			1_000_000,
+			100_000,
+		),
+		nil,
+		nil,
+		nil,
+		modelProvider,
+		findingValidator,
+		reviewPublisher,
+	)
+
+	request := review.ReviewRequest{
+		ReviewID:          "review-publisher-failure",
+		InstallationID:    123,
+		Organization:      "MorningBlossom",
+		Repository:        "test-repo",
+		PullRequestNumber: 42,
+		BaseSHA:           "base-sha",
+		HeadSHA:           "head-sha",
+	}
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		request,
+	)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "publish review") {
+		t.Fatalf("expected publish review error, got %v", err)
+	}
+
+	if !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected underlying publisher error, got %v", err)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("expected status failed, got %q", result.Status)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected one result error, got %d", len(result.Errors))
+	}
+
+	if reviewPublisher.calls != 1 {
+		t.Fatalf(
+			"expected publisher to be called once, got %d",
+			reviewPublisher.calls,
+		)
+	}
+
+	if modelProvider.calls != 1 {
+		t.Fatalf(
+			"expected model provider to be called once, got %d",
+			modelProvider.calls,
+		)
+	}
+
+	if findingValidator.contextCalls != 1 {
+		t.Fatalf(
+			"expected validator to be called once, got %d",
+			findingValidator.contextCalls,
+		)
+	}
+}
+
+type failingWorkspaceBuilder struct {
+	err error
+}
+
+func (b *failingWorkspaceBuilder) Build(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	ref string,
+) (workspace.Workspace, error) {
+	return nil, b.err
+}
+
+func TestReviewOrchestrator_FailsWhenWorkspaceBuildFails(t *testing.T) {
+	expectedErr := errors.New("workspace build failed")
+
+	githubProvider := &fakeGitHubProvider{}
+
+	workspaceBuilder := &fakeWorkspaceBuilder{
+		err: expectedErr,
+	}
+
+	modelProvider := &fakeModelProvider{}
+	findingValidator := &fakeValidator{}
+	reviewPublisher := &fakePublisher{}
+
+	workspaceAnalyzer := &fakeWorkspaceAnalyzer{
+		name: "go-vet",
+	}
+
+	orchestrator := NewOrchestrator(
+		githubProvider,
+		contextbuilder.NewBuilder(
+			githubProvider,
+			10,
+			1_000_000,
+			100_000,
+		),
+		workspaceBuilder,
+		nil,
+		[]analyzer.WorkspaceAnalyzer{
+			workspaceAnalyzer,
+		},
+		modelProvider,
+		findingValidator,
+		reviewPublisher,
+	)
+
+	request := review.ReviewRequest{
+		ReviewID:          "review-workspace-build-failure",
+		InstallationID:    123,
+		Organization:      "MorningBlossom",
+		Repository:        "test-repo",
+		PullRequestNumber: 42,
+		BaseSHA:           "base-sha",
+		HeadSHA:           "head-sha",
+	}
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		request,
+	)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "build repository workspace") {
+		t.Fatalf(
+			"expected build repository workspace error, got %v",
+			err,
+		)
+	}
+
+	if !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf(
+			"expected underlying workspace error, got %v",
+			err,
+		)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("expected status failed, got %q", result.Status)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf(
+			"expected one result error, got %d",
+			len(result.Errors),
+		)
+	}
+
+	if workspaceBuilder.calls != 1 {
+		t.Fatalf(
+			"expected workspace builder to be called once, got %d",
+			workspaceBuilder.calls,
+		)
+	}
+
+	if workspaceAnalyzer.calls != 0 {
+		t.Fatalf(
+			"expected workspace analyzer not to be called, got %d calls",
+			workspaceAnalyzer.calls,
+		)
+	}
+
+	if modelProvider.calls != 0 {
+		t.Fatalf(
+			"expected model not to be called, got %d calls",
+			modelProvider.calls,
+		)
+	}
+
+	if findingValidator.contextCalls != 0 {
+		t.Fatalf(
+			"expected validator not to be called, got %d calls",
+			findingValidator.contextCalls,
+		)
+	}
+
+	if reviewPublisher.calls != 0 {
+		t.Fatalf(
+			"expected publisher not to be called, got %d calls",
+			reviewPublisher.calls,
 		)
 	}
 }
