@@ -89,11 +89,6 @@ func (h *GithubWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if h.deliveryStore.Seen(deliveryID) {
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-
 	if eventType != "pull_request" {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -144,6 +139,11 @@ func (h *GithubWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if h.deliveryStore.Seen(deliveryID) {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
 	request := review.ReviewRequest{
 		ReviewID:            deliveryID,
 		InstallationID:      event.Installation.ID,
@@ -161,6 +161,8 @@ func (h *GithubWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Requ
 
 	_, err = h.orchestrator.Review(r.Context(), request)
 	if err != nil {
+		h.deliveryStore.Forget(deliveryID)
+
 		http.Error(w, "review failed", http.StatusInternalServerError)
 		return
 	}

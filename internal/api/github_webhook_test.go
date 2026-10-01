@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,19 @@ import (
 )
 
 const testWebhookSecret = "test-secret"
+
+type failingWebhookTestOrchestrator struct {
+	calls int
+}
+
+func (f *failingWebhookTestOrchestrator) Review(
+	_ context.Context,
+	_ review.ReviewRequest,
+) (review.ReviewResult, error) {
+	f.calls++
+
+	return review.ReviewResult{}, errors.New("orchestrator failure")
+}
 
 type webhookTestOrchestrator struct {
 	called  bool
@@ -448,5 +462,92 @@ func TestGitHubWebhookHandler_DuplicateDelivery(t *testing.T) {
 
 	if fakeOrchestrator.called {
 		t.Fatal("expected duplicate delivery not to call orchestrator")
+	}
+}
+func TestGitHubWebhookHandler_RetriesFailedDelivery(t *testing.T) {
+	payload := `{
+		"action": "opened",
+		"installation": {
+			"id": 123
+		},
+		"repository": {
+			"name": "test-repo",
+			"owner": {
+				"login": "MorningBlossom"
+			}
+		},
+		"pull_request": {
+			"number": 42,
+			"title": "Test PR",
+			"body": "Test",
+			"user": {
+				"login": "test-user"
+			},
+			"base": {
+				"sha": "base-123"
+			},
+			"head": {
+				"sha": "head-456"
+			}
+		}
+	}`
+
+	failingOrchestrator := &failingWebhookTestOrchestrator{}
+	deliveryStore := NewDeliveryStore()
+
+	handler := NewGithubWebhookHandler(
+		failingOrchestrator,
+		testWebhookSecret,
+		deliveryStore,
+	)
+
+	req1 := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"pull_request",
+		"delivery-retry-001",
+	)
+
+	rec1 := httptest.NewRecorder()
+
+	handler.HandleWebhook(rec1, req1)
+
+	if rec1.Code != http.StatusInternalServerError {
+		t.Fatalf(
+			"first request: expected 500, got %d",
+			rec1.Code,
+		)
+	}
+
+	if failingOrchestrator.calls != 1 {
+		t.Fatalf(
+			"expected orchestrator to be called once, got %d",
+			failingOrchestrator.calls,
+		)
+	}
+
+	req2 := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"pull_request",
+		"delivery-retry-001",
+	)
+
+	rec2 := httptest.NewRecorder()
+
+	handler.HandleWebhook(rec2, req2)
+
+	if rec2.Code != http.StatusInternalServerError {
+		t.Fatalf(
+			"retry request: expected 500, got %d",
+			rec2.Code,
+		)
+	}
+
+	if failingOrchestrator.calls != 2 {
+		t.Fatalf(
+			"expected retry to call orchestrator again, got %d calls",
+			failingOrchestrator.calls,
+		)
 	}
 }

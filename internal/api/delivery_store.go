@@ -22,6 +22,12 @@ func (s *DeliveryStore) Seen(deliveryID string) bool {
 	}
 
 	s.deliveries[deliveryID] = struct{}{}
-
 	return false
+}
+
+func (s *DeliveryStore) Forget(deliveryID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.deliveries, deliveryID)
 }
