@@ -9,6 +9,8 @@ import (
 	"github.com/MorningBlossom/ai-code-review/internal/review"
 )
 
+const reviewMarkerPrefix = "<!-- ai-code-review:"
+
 type GitHubReviewClient interface {
 	CreatePullRequestReview(
 		ctx context.Context,
@@ -18,6 +20,14 @@ type GitHubReviewClient interface {
 		pullRequestNumber int,
 		review github.PullRequestReview,
 	) error
+
+	ListPullRequestReviews(
+		ctx context.Context,
+		installationID int64,
+		organization string,
+		repository string,
+		pullRequestNumber int,
+	) ([]github.PullRequestReviewInfo, error)
 }
 
 type GitHubPublisher struct {
@@ -37,6 +47,23 @@ func (p *GitHubPublisher) Publish(
 ) error {
 	if p.client == nil {
 		return fmt.Errorf("GitHub review client is nil")
+	}
+
+	marker := buildReviewMarker(request)
+
+	existingReviews, err := p.client.ListPullRequestReviews(
+		ctx,
+		request.InstallationID,
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
+	)
+	if err != nil {
+		return fmt.Errorf("list existing GitHub reviews: %w", err)
+	}
+
+	if hasPublishedReview(existingReviews, marker, request.HeadSHA) {
+		return nil
 	}
 
 	var comments []github.PullRequestReviewComment
@@ -70,16 +97,55 @@ func (p *GitHubPublisher) Publish(
 		request.Repository,
 		request.PullRequestNumber,
 		github.PullRequestReview{
-			Body:     buildReviewBody(result),
+			Body:     buildReviewBody(request, result),
 			Event:    event,
 			Comments: comments,
 		},
 	)
 }
 
-func buildReviewBody(result review.ReviewResult) string {
+func buildReviewMarker(request review.ReviewRequest) string {
+	return fmt.Sprintf(
+		"%s%s/%s/pr-%d/%s/%s -->",
+		reviewMarkerPrefix,
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
+		request.HeadSHA,
+		request.ReviewPolicyVersion,
+	)
+}
+
+func containsReviewMarker(body string, marker string) bool {
+	return strings.Contains(body, marker)
+}
+
+func hasPublishedReview(
+	reviews []github.PullRequestReviewInfo,
+	marker string,
+	headSHA string,
+) bool {
+	for _, existingReview := range reviews {
+		if existingReview.CommitSHA != headSHA {
+			continue
+		}
+
+		if containsReviewMarker(existingReview.Body, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func buildReviewBody(
+	request review.ReviewRequest,
+	result review.ReviewResult,
+) string {
 	var builder strings.Builder
 
+	builder.WriteString(buildReviewMarker(request))
+	builder.WriteString("\n\n")
 	builder.WriteString("## AI Code Review\n\n")
 
 	if len(result.Findings) == 0 {

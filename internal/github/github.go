@@ -62,3 +62,10 @@ type PullRequestReviewComment struct {
 	Side string
 	Body string
 }
+
+type PullRequestReviewInfo struct {
+	ID        int64
+	UserLogin string
+	Body      string
+	CommitSHA string
+}

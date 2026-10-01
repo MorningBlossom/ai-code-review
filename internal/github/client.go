@@ -79,6 +79,17 @@ type pullRequestReviewComment struct {
 	Body string `json:"body"`
 }
 
+type pullRequestReviewResponse struct {
+	ID int64 `json:"id"`
+
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+
+	Body     string `json:"body"`
+	CommitID string `json:"commit_id"`
+}
+
 func (c *Client) GetPullRequest(
 	ctx context.Context,
 	installationID int64,
@@ -559,4 +570,143 @@ func (c *Client) CreatePullRequestReview(
 	}
 
 	return nil
+}
+
+func (c *Client) ListPullRequestReviews(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	pullRequestNumber int,
+) ([]PullRequestReviewInfo, error) {
+	token, err := c.authenticator.GetInstallationToken(
+		ctx,
+		installationID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get installation token: %w",
+			err,
+		)
+	}
+
+	const perPage = 100
+
+	var result []PullRequestReviewInfo
+
+	for page := 1; ; page++ {
+		reviewsURL := fmt.Sprintf(
+			"%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d",
+			c.baseURL,
+			organization,
+			repository,
+			pullRequestNumber,
+			perPage,
+			page,
+		)
+
+		req, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodGet,
+			reviewsURL,
+			nil,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"create GitHub pull request reviews request: %w",
+				err,
+			)
+		}
+
+		req.Header.Set(
+			"Authorization",
+			"Bearer "+token,
+		)
+		req.Header.Set(
+			"Accept",
+			"application/vnd.github+json",
+		)
+		req.Header.Set(
+			"X-GitHub-Api-Version",
+			"2022-11-28",
+		)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"request GitHub pull request reviews page %d: %w",
+				page,
+				err,
+			)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			responseBody, readErr := io.ReadAll(resp.Body)
+			closeErr := resp.Body.Close()
+
+			if readErr != nil {
+				return nil, fmt.Errorf(
+					"GitHub pull request reviews page %d returned status %d",
+					page,
+					resp.StatusCode,
+				)
+			}
+
+			if closeErr != nil {
+				return nil, fmt.Errorf(
+					"GitHub pull request reviews page %d returned status %d; close response body: %w",
+					page,
+					resp.StatusCode,
+					closeErr,
+				)
+			}
+
+			return nil, fmt.Errorf(
+				"GitHub pull request reviews page %d returned status %d: %s",
+				page,
+				resp.StatusCode,
+				strings.TrimSpace(string(responseBody)),
+			)
+		}
+
+		var reviews []pullRequestReviewResponse
+
+		err = json.NewDecoder(resp.Body).Decode(&reviews)
+
+		closeErr := resp.Body.Close()
+
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode GitHub pull request reviews page %d: %w",
+				page,
+				err,
+			)
+		}
+
+		if closeErr != nil {
+			return nil, fmt.Errorf(
+				"close GitHub pull request reviews page %d response body: %w",
+				page,
+				closeErr,
+			)
+		}
+
+		for _, currentReview := range reviews {
+			result = append(
+				result,
+				PullRequestReviewInfo{
+					ID:        currentReview.ID,
+					UserLogin: currentReview.User.Login,
+					Body:      currentReview.Body,
+					CommitSHA: currentReview.CommitID,
+				},
+			)
+		}
+
+		if len(reviews) < perPage {
+			break
+		}
+	}
+
+	return result, nil
 }
