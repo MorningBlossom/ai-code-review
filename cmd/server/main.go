@@ -22,16 +22,22 @@ func main() {
 	appConfig := config.Load()
 
 	var githubClient github.Provider
+	var githubReviewClient publisher.GitHubReviewClient
 
 	if appConfig.AppEnv == "development" {
 		archive, err := github.NewFakeRepositoryArchive()
 		if err != nil {
-			log.Fatalf("create fake repository archive: %v", err)
+			log.Fatalf("failed to create fake repository archive: %v", err)
 		}
 
-		githubClient = &github.FakeProvider{
+		fakeGitHub := &github.FakeProvider{
 			Archive: archive,
 		}
+
+		githubClient = fakeGitHub
+
+		// Keep fake publishing in development.
+		githubReviewClient = nil
 	} else {
 		if appConfig.GitHubWebhookSecret == "" {
 			log.Fatal("GITHUB_WEBHOOK_SECRET is required")
@@ -52,14 +58,17 @@ func main() {
 			},
 		)
 		if err != nil {
-			log.Fatalf("create GitHub App authenticator: %v", err)
+			log.Fatalf("failed to create GitHub App authenticator: %v", err)
 		}
 
-		githubClient = github.NewClient(
+		realGitHubClient := github.NewClient(
 			http.DefaultClient,
 			appAuthenticator,
 			"https://api.github.com",
 		)
+
+		githubClient = realGitHubClient
+		githubReviewClient = realGitHubClient
 	}
 
 	commandRunner := analyzer.NewOSCommandRunner()
@@ -67,6 +76,8 @@ func main() {
 	analyzers := []analyzer.Analyzer{
 		analyzer.NewGofmtAnalyzer(commandRunner),
 		analyzer.NewGoRulesAnalyzer(),
+		analyzer.NewSecurityRulesAnalyzer(),
+		analyzer.NewTestQualityAnalyzer(),
 	}
 
 	workspaceAnalyzers := []analyzer.WorkspaceAnalyzer{
@@ -86,9 +97,15 @@ func main() {
 		},
 	)
 
-	fakeValidator := &validator.FakeValidator{}
+	findingValidator := validator.NewFindingValidator()
 
-	fakePublisher := &publisher.FakePublisher{}
+	var reviewPublisher publisher.Publisher
+
+	if appConfig.AppEnv == "development" {
+		reviewPublisher = &publisher.FakePublisher{}
+	} else {
+		reviewPublisher = publisher.NewGitHubPublisher(githubReviewClient)
+	}
 
 	deliveryStore := api.NewDeliveryStore()
 
@@ -110,8 +127,8 @@ func main() {
 		analyzers,
 		workspaceAnalyzers,
 		modelProvider,
-		fakeValidator,
-		fakePublisher,
+		findingValidator,
+		reviewPublisher,
 	)
 
 	githubWebhookHandler := api.NewGithubWebhookHandler(reviewOrchestrator, appConfig.GitHubWebhookSecret, deliveryStore)

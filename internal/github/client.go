@@ -66,6 +66,19 @@ type pullRequestResponse struct {
 	} `json:"head"`
 }
 
+type pullRequestReviewRequest struct {
+	Body     string                     `json:"body"`
+	Event    string                     `json:"event"`
+	Comments []pullRequestReviewComment `json:"comments,omitempty"`
+}
+
+type pullRequestReviewComment struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Side string `json:"side"`
+	Body string `json:"body"`
+}
+
 func (c *Client) GetPullRequest(
 	ctx context.Context,
 	installationID int64,
@@ -435,4 +448,115 @@ func (c *Client) DownloadRepositoryArchive(
 	}
 
 	return archive, nil
+}
+
+func (c *Client) CreatePullRequestReview(
+	ctx context.Context,
+	installationID int64,
+	organization string,
+	repository string,
+	pullRequestNumber int,
+	reviewData PullRequestReview,
+) error {
+	token, err := c.authenticator.GetInstallationToken(
+		ctx,
+		installationID,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"get installation token: %w",
+			err,
+		)
+	}
+
+	reviewURL := fmt.Sprintf(
+		"%s/repos/%s/%s/pulls/%d/reviews",
+		c.baseURL,
+		organization,
+		repository,
+		pullRequestNumber,
+	)
+
+	requestBody := pullRequestReviewRequest{
+		Body:  reviewData.Body,
+		Event: reviewData.Event,
+	}
+
+	for _, comment := range reviewData.Comments {
+		requestBody.Comments = append(
+			requestBody.Comments,
+			pullRequestReviewComment{
+				Path: comment.Path,
+				Line: comment.Line,
+				Side: comment.Side,
+				Body: comment.Body,
+			},
+		)
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf(
+			"encode GitHub pull request review: %w",
+			err,
+		)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		reviewURL,
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"create GitHub pull request review request: %w",
+			err,
+		)
+	}
+
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+token,
+	)
+	req.Header.Set(
+		"Accept",
+		"application/vnd.github+json",
+	)
+	req.Header.Set(
+		"X-GitHub-Api-Version",
+		"2022-11-28",
+	)
+	req.Header.Set(
+		"Content-Type",
+		"application/json",
+	)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf(
+			"request GitHub pull request review: %w",
+			err,
+		)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		responseBody, readErr := io.ReadAll(resp.Body)
+
+		if readErr != nil {
+			return fmt.Errorf(
+				"GitHub pull request review returned status %d",
+				resp.StatusCode,
+			)
+		}
+
+		return fmt.Errorf(
+			"GitHub pull request review returned status %d: %s",
+			resp.StatusCode,
+			strings.TrimSpace(string(responseBody)),
+		)
+	}
+
+	return nil
 }

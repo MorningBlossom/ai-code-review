@@ -49,3 +49,16 @@ type PullRequest struct {
 	HeadSHA string
 	Author  string
 }
+
+type PullRequestReview struct {
+	Body     string
+	Event    string
+	Comments []PullRequestReviewComment
+}
+
+type PullRequestReviewComment struct {
+	Path string
+	Line int
+	Side string
+	Body string
+}
