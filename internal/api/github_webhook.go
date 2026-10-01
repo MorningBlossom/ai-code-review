@@ -11,6 +11,8 @@ import (
 	"github.com/MorningBlossom/ai-code-review/internal/review"
 )
 
+const maxWebhookPayloadSize = 5 << 20 // 5 MiB
+
 type GithubWebhookHandler struct {
 	orchestrator  orchestrator.Orchestrator
 	webhookSecret string
@@ -59,9 +61,18 @@ func (h *GithubWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	payload, err := io.ReadAll(r.Body)
+	payload, err := io.ReadAll(io.LimitReader(
+		r.Body,
+		maxWebhookPayloadSize+1,
+	))
+
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(payload) > maxWebhookPayloadSize {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 

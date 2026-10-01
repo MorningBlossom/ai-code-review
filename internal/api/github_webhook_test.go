@@ -551,3 +551,39 @@ func TestGitHubWebhookHandler_RetriesFailedDelivery(t *testing.T) {
 		)
 	}
 }
+
+func TestGitHubWebhookHandler_RequestBodyTooLarge(t *testing.T) {
+	payload := strings.Repeat("a", maxWebhookPayloadSize+1)
+
+	req := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"pull_request",
+		"delivery-large-payload",
+	)
+
+	fakeOrchestrator := &webhookTestOrchestrator{}
+	deliveryStore := NewDeliveryStore()
+
+	handler := NewGithubWebhookHandler(
+		fakeOrchestrator,
+		testWebhookSecret,
+		deliveryStore,
+	)
+
+	rec := httptest.NewRecorder()
+
+	handler.HandleWebhook(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusRequestEntityTooLarge,
+			rec.Code,
+		)
+	}
+
+	if fakeOrchestrator.called {
+		t.Fatal("expected oversized request not to call orchestrator")
+	}
+}
