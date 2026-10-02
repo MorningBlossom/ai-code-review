@@ -52,11 +52,14 @@ func TestGitHubPublisher_Publish(t *testing.T) {
 	publisher := NewGitHubPublisher(client)
 
 	request := review.ReviewRequest{
-		ReviewID:          "review-123",
-		InstallationID:    456,
-		Organization:      "MorningBlossom",
-		Repository:        "example-repo",
-		PullRequestNumber: 42,
+		ReviewID:            "review-123",
+		InstallationID:      456,
+		Organization:        "MorningBlossom",
+		Repository:          "example-repo",
+		PullRequestNumber:   42,
+		HeadSHA:             "head-123",
+		ReviewPolicyVersion: "v1",
+		ReviewMode:          "pull_request",
 	}
 
 	result := review.ReviewResult{
@@ -79,13 +82,20 @@ func TestGitHubPublisher_Publish(t *testing.T) {
 		},
 	}
 
-	err := publisher.Publish(context.Background(), request, result)
+	err := publisher.Publish(
+		context.Background(),
+		request,
+		result,
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if client.review.Event != "COMMENT" {
-		t.Fatalf("expected COMMENT event, got %q", client.review.Event)
+		t.Fatalf(
+			"expected COMMENT event, got %q",
+			client.review.Event,
+		)
 	}
 
 	if client.review.Body == "" {
@@ -93,21 +103,33 @@ func TestGitHubPublisher_Publish(t *testing.T) {
 	}
 
 	if len(client.review.Comments) != 1 {
-		t.Fatalf("expected 1 comment, got %d", len(client.review.Comments))
+		t.Fatalf(
+			"expected 1 comment, got %d",
+			len(client.review.Comments),
+		)
 	}
 
 	comment := client.review.Comments[0]
 
 	if comment.Path != "internal/payment/service.go" {
-		t.Fatalf("unexpected path: %q", comment.Path)
+		t.Fatalf(
+			"unexpected path: %q",
+			comment.Path,
+		)
 	}
 
 	if comment.Line != 27 {
-		t.Fatalf("unexpected line: %d", comment.Line)
+		t.Fatalf(
+			"unexpected line: %d",
+			comment.Line,
+		)
 	}
 
 	if comment.Side != "RIGHT" {
-		t.Fatalf("unexpected side: %q", comment.Side)
+		t.Fatalf(
+			"unexpected side: %q",
+			comment.Side,
+		)
 	}
 
 	if comment.Body == "" {
@@ -115,16 +137,21 @@ func TestGitHubPublisher_Publish(t *testing.T) {
 	}
 }
 
-func TestGitHubPublisher_Publish_RequestChangesForBlockingFinding(t *testing.T) {
+func TestGitHubPublisher_Publish_RequestChangesForBlockingFinding(
+	t *testing.T,
+) {
 	client := &fakeGitHubReviewClient{}
 	publisher := NewGitHubPublisher(client)
 
 	request := review.ReviewRequest{
-		ReviewID:          "review-456",
-		InstallationID:    456,
-		Organization:      "MorningBlossom",
-		Repository:        "example-repo",
-		PullRequestNumber: 42,
+		ReviewID:            "review-456",
+		InstallationID:      456,
+		Organization:        "MorningBlossom",
+		Repository:          "example-repo",
+		PullRequestNumber:   42,
+		HeadSHA:             "head-123",
+		ReviewPolicyVersion: "v1",
+		ReviewMode:          "pull_request",
 	}
 
 	result := review.ReviewResult{
@@ -146,7 +173,11 @@ func TestGitHubPublisher_Publish_RequestChangesForBlockingFinding(t *testing.T) 
 		},
 	}
 
-	err := publisher.Publish(context.Background(), request, result)
+	err := publisher.Publish(
+		context.Background(),
+		request,
+		result,
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,14 +189,20 @@ func TestGitHubPublisher_Publish_RequestChangesForBlockingFinding(t *testing.T) 
 		)
 	}
 }
-func TestGitHubPublisher_Publish_SkipsDuplicateReview(t *testing.T) {
+
+func TestGitHubPublisher_Publish_SkipsDuplicateReview(
+	t *testing.T,
+) {
 	client := &fakeGitHubReviewClient{
 		existingReviews: []github.PullRequestReviewInfo{
 			{
 				ID:        100,
 				UserLogin: "ai-code-review-bot",
 				CommitSHA: "head-123",
-				Body:      "<!-- ai-code-review:MorningBlossom/example-repo/pr-42/head-123/v1 -->\n\n## AI Code Review",
+				Body: "<!-- ai-code-review:" +
+					"MorningBlossom/example-repo/pr-42/" +
+					"head-123/v1/pull_request -->" +
+					"\n\n## AI Code Review",
 			},
 		},
 	}
@@ -180,6 +217,7 @@ func TestGitHubPublisher_Publish_SkipsDuplicateReview(t *testing.T) {
 		PullRequestNumber:   42,
 		HeadSHA:             "head-123",
 		ReviewPolicyVersion: "v1",
+		ReviewMode:          "pull_request",
 	}
 
 	result := review.ReviewResult{
@@ -196,7 +234,11 @@ func TestGitHubPublisher_Publish_SkipsDuplicateReview(t *testing.T) {
 		},
 	}
 
-	err := publisher.Publish(context.Background(), request, result)
+	err := publisher.Publish(
+		context.Background(),
+		request,
+		result,
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -209,7 +251,111 @@ func TestGitHubPublisher_Publish_SkipsDuplicateReview(t *testing.T) {
 	}
 }
 
-func TestGitHubPublisher_Publish_FailsWhenListingReviewsFails(t *testing.T) {
+func TestGitHubPublisher_Publish_ManualReviewIsNotDuplicateOfAutomaticReview(
+	t *testing.T,
+) {
+	client := &fakeGitHubReviewClient{
+		existingReviews: []github.PullRequestReviewInfo{
+			{
+				ID:        100,
+				UserLogin: "ai-code-review-bot",
+				CommitSHA: "head-123",
+				Body: "<!-- ai-code-review:" +
+					"MorningBlossom/example-repo/pr-42/" +
+					"head-123/v1/pull_request -->" +
+					"\n\n## AI Code Review",
+			},
+		},
+	}
+
+	publisher := NewGitHubPublisher(client)
+
+	request := review.ReviewRequest{
+		ReviewID:            "manual-review",
+		InstallationID:      456,
+		Organization:        "MorningBlossom",
+		Repository:          "example-repo",
+		PullRequestNumber:   42,
+		HeadSHA:             "head-123",
+		ReviewPolicyVersion: "v1",
+		ReviewMode:          "manual_full_pr",
+	}
+
+	result := review.ReviewResult{
+		Status: "completed",
+	}
+
+	err := publisher.Publish(
+		context.Background(),
+		request,
+		result,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.createCalls != 1 {
+		t.Fatalf(
+			"expected manual review to create a new GitHub review, got %d calls",
+			client.createCalls,
+		)
+	}
+}
+
+func TestGitHubPublisher_Publish_SkipsDuplicateManualReview(
+	t *testing.T,
+) {
+	client := &fakeGitHubReviewClient{
+		existingReviews: []github.PullRequestReviewInfo{
+			{
+				ID:        101,
+				UserLogin: "ai-code-review-bot",
+				CommitSHA: "head-123",
+				Body: "<!-- ai-code-review:" +
+					"MorningBlossom/example-repo/pr-42/" +
+					"head-123/v1/manual_full_pr -->" +
+					"\n\n## AI Code Review",
+			},
+		},
+	}
+
+	publisher := NewGitHubPublisher(client)
+
+	request := review.ReviewRequest{
+		ReviewID:            "manual-review-2",
+		InstallationID:      456,
+		Organization:        "MorningBlossom",
+		Repository:          "example-repo",
+		PullRequestNumber:   42,
+		HeadSHA:             "head-123",
+		ReviewPolicyVersion: "v1",
+		ReviewMode:          "manual_full_pr",
+	}
+
+	result := review.ReviewResult{
+		Status: "completed",
+	}
+
+	err := publisher.Publish(
+		context.Background(),
+		request,
+		result,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.createCalls != 0 {
+		t.Fatalf(
+			"expected duplicate manual review to be skipped, got %d calls",
+			client.createCalls,
+		)
+	}
+}
+
+func TestGitHubPublisher_Publish_FailsWhenListingReviewsFails(
+	t *testing.T,
+) {
 	client := &fakeGitHubReviewClient{
 		listErr: errors.New("GitHub API returned 403"),
 	}
@@ -224,6 +370,7 @@ func TestGitHubPublisher_Publish_FailsWhenListingReviewsFails(t *testing.T) {
 		PullRequestNumber:   42,
 		HeadSHA:             "head-123",
 		ReviewPolicyVersion: "v1",
+		ReviewMode:          "pull_request",
 	}
 
 	result := review.ReviewResult{
@@ -247,17 +394,25 @@ func TestGitHubPublisher_Publish_FailsWhenListingReviewsFails(t *testing.T) {
 	)
 
 	if err == nil {
-		t.Fatal("expected error when listing existing reviews fails")
+		t.Fatal(
+			"expected error when listing existing reviews fails",
+		)
 	}
 
-	if !strings.Contains(err.Error(), "list existing GitHub reviews") {
+	if !strings.Contains(
+		err.Error(),
+		"list existing GitHub reviews",
+	) {
 		t.Fatalf(
 			"expected review listing error, got %v",
 			err,
 		)
 	}
 
-	if !strings.Contains(err.Error(), "GitHub API returned 403") {
+	if !strings.Contains(
+		err.Error(),
+		"GitHub API returned 403",
+	) {
 		t.Fatalf(
 			"expected underlying GitHub error, got %v",
 			err,
@@ -266,12 +421,15 @@ func TestGitHubPublisher_Publish_FailsWhenListingReviewsFails(t *testing.T) {
 
 	if client.createCalls != 0 {
 		t.Fatalf(
-			"expected no GitHub review creation after list failure, got %d calls",
+			"expected no GitHub review creation after list failure, got %d",
 			client.createCalls,
 		)
 	}
 }
-func TestGitHubPublisher_Publish_NonInlineFindingsRemainInSummary(t *testing.T) {
+
+func TestGitHubPublisher_Publish_NonInlineFindingsRemainInSummary(
+	t *testing.T,
+) {
 	client := &fakeGitHubReviewClient{}
 
 	publisher := NewGitHubPublisher(client)
@@ -284,6 +442,7 @@ func TestGitHubPublisher_Publish_NonInlineFindingsRemainInSummary(t *testing.T) 
 		PullRequestNumber:   42,
 		HeadSHA:             "head-123",
 		ReviewPolicyVersion: "v1",
+		ReviewMode:          "pull_request",
 	}
 
 	result := review.ReviewResult{

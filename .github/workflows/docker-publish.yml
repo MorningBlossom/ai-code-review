@@ -12,13 +12,40 @@ permissions:
   packages: write
 
 jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{inputs.go-version}}
+          cache: true
+
+      - name: Run Golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+      - name: Run Tests
+        run: go test -v -race -cover ./...
+
   docker-publish:
     name: Build and Publish Docker Image
     runs-on: ubuntu-latest
-
+    needs: lint-and-test
+    outputs:
+      image-tag: ${{ steps.vars.outputs.sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set Short Commit SHA
+        id: vars
+        run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -55,3 +82,26 @@ jobs:
         run: |
           docker push ghcr.io/${GITHUB_REPOSITORY,,}:latest
           docker push ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}
+
+  trigger-deployment:
+    name: Trigger Deployment Dispatch
+    needs: [lint-and-test, docker-publish]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Send repository_dispatch to Infra Repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVICE_NAME: ${{ github.event.repository.name }}
+          TARGET_REPO: "MorningBlossom/release"
+          IMAGE_PATH: "ghcr.io/${{ github.repository }}"
+          IMAGE_TAG: ${{ needs.docker-publish.outputs.image-tag }}
+        run: |
+          echo "Dispatching 'deploy-service' to $TARGET_REPO for $SERVICE_NAME with tag $IMAGE_TAG..."
+          
+          gh api "repos/$TARGET_REPO/dispatches" \
+            -H "Accept: application/vnd.github+json" \
+            -F "event_type=deploy-service" \
+            -F "client_payload[service]=$SERVICE_NAME" \
+            -F "client_payload[image]=$IMAGE_PATH" \
+            -F "client_payload[tag]=$IMAGE_TAG"

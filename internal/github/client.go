@@ -55,12 +55,16 @@ type pullRequestResponse struct {
 	Number int    `json:"number"`
 	Title  string `json:"title"`
 	Body   string `json:"body"`
-	User   struct {
+	Draft  bool   `json:"draft"`
+
+	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
+
 	Base struct {
 		SHA string `json:"sha"`
 	} `json:"base"`
+
 	Head struct {
 		SHA string `json:"sha"`
 	} `json:"head"`
@@ -165,6 +169,7 @@ func (c *Client) GetPullRequest(
 		BaseSHA: result.Base.SHA,
 		HeadSHA: result.Head.SHA,
 		Author:  result.User.Login,
+		Draft:   result.Draft,
 	}, nil
 }
 

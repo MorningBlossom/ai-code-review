@@ -22,11 +22,13 @@ import (
 )
 
 func main() {
-
 	appConfig := config.Load()
 
 	if err := appConfig.Validate(); err != nil {
-		log.Fatalf("invalid configuration: %v", err)
+		log.Fatalf(
+			"invalid configuration: %v",
+			err,
+		)
 	}
 
 	var githubClient github.Provider
@@ -35,7 +37,10 @@ func main() {
 	if appConfig.AppEnv == "development" {
 		archive, err := github.NewFakeRepositoryArchive()
 		if err != nil {
-			log.Fatalf("failed to create fake repository archive: %v", err)
+			log.Fatalf(
+				"failed to create fake repository archive: %v",
+				err,
+			)
 		}
 
 		fakeGitHub := &github.FakeProvider{
@@ -44,10 +49,9 @@ func main() {
 
 		githubClient = fakeGitHub
 
-		// Keep fake publishing in development.
+		// Development uses fake publishing.
 		githubReviewClient = nil
 	} else {
-
 		appAuthenticator, err := github.NewGitHubAppAuthenticator(
 			github.AppConfig{
 				AppID:          appConfig.GitHubAppID,
@@ -55,7 +59,10 @@ func main() {
 			},
 		)
 		if err != nil {
-			log.Fatalf("failed to create GitHub App authenticator: %v", err)
+			log.Fatalf(
+				"failed to create GitHub App authenticator: %v",
+				err,
+			)
 		}
 
 		githubHTTPClient := &http.Client{
@@ -105,7 +112,9 @@ func main() {
 	if appConfig.AppEnv == "development" {
 		reviewPublisher = &publisher.FakePublisher{}
 	} else {
-		reviewPublisher = publisher.NewGitHubPublisher(githubReviewClient)
+		reviewPublisher = publisher.NewGitHubPublisher(
+			githubReviewClient,
+		)
 	}
 
 	deliveryStore := api.NewDeliveryStore()
@@ -134,6 +143,7 @@ func main() {
 
 	githubWebhookHandler := api.NewGithubWebhookHandler(
 		reviewOrchestrator,
+		githubClient,
 		appConfig.GitHubWebhookSecret,
 		deliveryStore,
 		appConfig.GitHubOrganization,
@@ -145,12 +155,22 @@ func main() {
 		appConfig.GitHubOrganization,
 	)
 
-	// routes
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/health", handler.Health)
-	mux.HandleFunc("/github/webhook", githubWebhookHandler.HandleWebhook)
-	mux.HandleFunc("/reviews", handler.CreateReview)
+	mux.HandleFunc(
+		"/health",
+		handler.Health,
+	)
+
+	mux.HandleFunc(
+		"/github/webhook",
+		githubWebhookHandler.HandleWebhook,
+	)
+
+	mux.HandleFunc(
+		"/reviews",
+		handler.CreateReview,
+	)
 
 	server := &http.Server{
 		Addr:              ":8080",
@@ -180,11 +200,17 @@ func main() {
 	select {
 	case err := <-serverErrors:
 		if err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server failed: %v", err)
+			log.Fatalf(
+				"server failed: %v",
+				err,
+			)
 		}
 
 	case sig := <-shutdownSignals:
-		log.Printf("shutdown signal received: %s", sig)
+		log.Printf(
+			"shutdown signal received: %s",
+			sig,
+		)
 	}
 
 	shutdownContext, cancel := context.WithTimeout(
@@ -194,10 +220,16 @@ func main() {
 	defer cancel()
 
 	if err := server.Shutdown(shutdownContext); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
+		log.Printf(
+			"graceful shutdown failed: %v",
+			err,
+		)
 
 		if err := server.Close(); err != nil {
-			log.Printf("server close failed: %v", err)
+			log.Printf(
+				"server close failed: %v",
+				err,
+			)
 		}
 	}
 

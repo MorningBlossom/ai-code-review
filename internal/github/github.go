@@ -48,6 +48,7 @@ type PullRequest struct {
 	BaseSHA string
 	HeadSHA string
 	Author  string
+	Draft   bool
 }
 
 type PullRequestReview struct {

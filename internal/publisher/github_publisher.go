@@ -105,14 +105,21 @@ func (p *GitHubPublisher) Publish(
 }
 
 func buildReviewMarker(request review.ReviewRequest) string {
+	mode := request.ReviewMode
+
+	if mode == "" {
+		mode = "pull_request"
+	}
+
 	return fmt.Sprintf(
-		"%s%s/%s/pr-%d/%s/%s -->",
+		"%s%s/%s/pr-%d/%s/%s/%s -->",
 		reviewMarkerPrefix,
 		request.Organization,
 		request.Repository,
 		request.PullRequestNumber,
 		request.HeadSHA,
 		request.ReviewPolicyVersion,
+		mode,
 	)
 }
 
