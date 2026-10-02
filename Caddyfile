@@ -1,0 +1,3 @@
+ai-code-review.stud-hub.me {
+	reverse_proxy ai-code-review:8080
+}
