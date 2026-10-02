@@ -400,10 +400,7 @@ func parsePatchNewLineStart(header string) int {
 		}
 
 		value := strings.TrimPrefix(part, "+")
-
-		if strings.HasPrefix(value, "+") {
-			value = strings.TrimPrefix(value, "+")
-		}
+		value = strings.TrimPrefix(value, "+")
 
 		if comma := strings.IndexByte(value, ','); comma >= 0 {
 			value = value[:comma]

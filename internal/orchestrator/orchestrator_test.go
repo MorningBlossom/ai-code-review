@@ -1075,26 +1075,6 @@ func TestReviewOrchestrator_FailsWhenContextBuildFails(t *testing.T) {
 	}
 }
 
-type failingValidator struct {
-	err error
-}
-
-func (v *failingValidator) Validate(
-	ctx context.Context,
-	findings []review.ReviewFinding,
-) ([]review.ReviewFinding, error) {
-	return nil, v.err
-}
-
-func (v *failingValidator) ValidateWithContext(
-	ctx context.Context,
-	request review.ReviewRequest,
-	reviewContext review.ReviewContext,
-	findings []review.ReviewFinding,
-) ([]review.ReviewFinding, error) {
-	return nil, v.err
-}
-
 func TestReviewOrchestrator_FailsWhenValidatorFails(t *testing.T) {
 	expectedErr := errors.New("finding validation failed")
 
@@ -1252,20 +1232,6 @@ func TestReviewOrchestrator_FailsWhenPublisherFails(t *testing.T) {
 			findingValidator.contextCalls,
 		)
 	}
-}
-
-type failingWorkspaceBuilder struct {
-	err error
-}
-
-func (b *failingWorkspaceBuilder) Build(
-	ctx context.Context,
-	installationID int64,
-	organization string,
-	repository string,
-	ref string,
-) (workspace.Workspace, error) {
-	return nil, b.err
 }
 
 func TestReviewOrchestrator_FailsWhenWorkspaceBuildFails(t *testing.T) {

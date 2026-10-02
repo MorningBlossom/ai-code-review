@@ -106,7 +106,9 @@ func extractTarGz(
 			err,
 		)
 	}
-	defer root.Close()
+	defer func() {
+		_ = root.Close()
+	}()
 
 	var extractedSize int64
 

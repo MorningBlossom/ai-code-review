@@ -160,21 +160,19 @@ func buildReviewBody(
 		return builder.String()
 	}
 
-	builder.WriteString(
-		fmt.Sprintf(
-			"Found **%d actionable finding(s)**.\n\n",
-			len(result.Findings),
-		),
+	_, _ = fmt.Fprintf(
+		&builder,
+		"Found **%d actionable finding(s)**.\n\n",
+		len(result.Findings),
 	)
 
 	for _, finding := range result.Findings {
-		builder.WriteString(
-			fmt.Sprintf(
-				"- **%s** — `%s` — %s\n",
-				strings.ToUpper(finding.Severity),
-				finding.Title,
-				finding.FilePath,
-			),
+		_, _ = fmt.Fprintf(
+			&builder,
+			"- **%s** — `%s` — %s\n",
+			strings.ToUpper(finding.Severity),
+			finding.Title,
+			finding.FilePath,
 		)
 	}
 
@@ -184,12 +182,11 @@ func buildReviewBody(
 func formatFindingComment(finding review.ReviewFinding) string {
 	var builder strings.Builder
 
-	builder.WriteString(
-		fmt.Sprintf(
-			"**%s** `%s`\n\n",
-			strings.ToUpper(finding.Severity),
-			finding.Title,
-		),
+	_, _ = fmt.Fprintf(
+		&builder,
+		"**%s** `%s`\n\n",
+		strings.ToUpper(finding.Severity),
+		finding.Title,
 	)
 
 	builder.WriteString(finding.Explanation)

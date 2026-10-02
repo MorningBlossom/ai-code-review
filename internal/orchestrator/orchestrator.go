@@ -168,7 +168,9 @@ func (o *ReviewOrchestrator) Review(
 			)
 		}
 
-		defer ws.Close()
+		defer func() {
+			_ = ws.Close()
+		}()
 
 		for _, currentAnalyzer := range o.workspaceAnalyzers {
 			analyzerResult := currentAnalyzer.AnalyzeWorkspace(

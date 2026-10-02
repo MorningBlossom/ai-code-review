@@ -41,7 +41,11 @@ func TestTempWorkspace_Run(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	defer ws.Close()
+	defer func() {
+		if err := ws.Close(); err != nil {
+			t.Errorf("close workspace: %v", err)
+		}
+	}()
 
 	if err := os.WriteFile(
 		filepath.Join(ws.Root(), "go.mod"),
@@ -83,7 +87,11 @@ func TestTempWorkspace_RunFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	defer ws.Close()
+	defer func() {
+		if err := ws.Close(); err != nil {
+			t.Errorf("close workspace: %v", err)
+		}
+	}()
 
 	result := ws.Run(
 		context.Background(),

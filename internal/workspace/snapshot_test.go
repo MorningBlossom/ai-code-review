@@ -31,7 +31,11 @@ func TestSnapshotBuilder_Build(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	defer ws.Close()
+	defer func() {
+		if err := ws.Close(); err != nil {
+			t.Errorf("close workspace: %v", err)
+		}
+	}()
 
 	goModPath := filepath.Join(ws.Root(), "go.mod")
 

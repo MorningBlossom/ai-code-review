@@ -1598,33 +1598,6 @@ func boolString(value bool) string {
 	return "false"
 }
 
-func intString(value int) string {
-	if value == 0 {
-		return "0"
-	}
-
-	if value < 0 {
-		return "-" + intString(-value)
-	}
-
-	var digits []byte
-
-	for value > 0 {
-		digits = append(
-			digits,
-			byte('0'+value%10),
-		)
-
-		value /= 10
-	}
-
-	for i, j := 0, len(digits)-1; i < j; i, j = i+1, j-1 {
-		digits[i], digits[j] = digits[j], digits[i]
-	}
-
-	return string(digits)
-}
-
 func signPayload(payload string, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(payload))

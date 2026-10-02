@@ -144,7 +144,9 @@ func (c *Client) GetPullRequest(
 			err,
 		)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return PullRequest{}, fmt.Errorf(
@@ -343,7 +345,9 @@ func (c *Client) GetFileContent(
 			err,
 		)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf(
@@ -440,7 +444,9 @@ func (c *Client) DownloadRepositoryArchive(
 			err,
 		)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf(
@@ -501,12 +507,7 @@ func (c *Client) CreatePullRequestReview(
 	for _, comment := range reviewData.Comments {
 		requestBody.Comments = append(
 			requestBody.Comments,
-			pullRequestReviewComment{
-				Path: comment.Path,
-				Line: comment.Line,
-				Side: comment.Side,
-				Body: comment.Body,
-			},
+			pullRequestReviewComment(comment),
 		)
 	}
 
@@ -555,7 +556,9 @@ func (c *Client) CreatePullRequestReview(
 			err,
 		)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		responseBody, readErr := io.ReadAll(resp.Body)

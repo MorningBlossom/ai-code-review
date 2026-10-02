@@ -171,9 +171,6 @@ func findTestFunctionIssues(
 	var findings []review.ReviewFinding
 
 	hasAssertion := false
-	hasFatal := false
-	hasErrorCheck := false
-	hasHelper := false
 
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
 		switch current := node.(type) {
@@ -193,14 +190,6 @@ func findTestFunctionIssues(
 				hasAssertion = true
 			}
 
-			switch selector.Sel.Name {
-			case "Fatal", "Fatalf":
-				hasFatal = true
-			case "Error", "Errorf":
-				hasErrorCheck = true
-			case "Helper":
-				hasHelper = true
-			}
 		}
 
 		return true
@@ -225,17 +214,6 @@ func findTestFunctionIssues(
 				"Add an explicit assertion or failure condition that verifies the behavior being tested.",
 			),
 		)
-	}
-
-	if hasErrorCheck && !hasFatal {
-		// Error/Errorf are valid assertions and should not be treated
-		// as a problem by themselves.
-	}
-
-	if hasHelper {
-		// Helper usage is intentionally detected so this analyzer can
-		// evolve to identify reusable test helpers without flagging
-		// them today.
 	}
 
 	return findings

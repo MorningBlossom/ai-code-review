@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/MorningBlossom/ai-code-review/internal/review"
@@ -20,7 +19,6 @@ import (
 )
 
 type GoRulesAnalyzer struct {
-	mu sync.Mutex
 }
 
 func NewGoRulesAnalyzer() *GoRulesAnalyzer {
@@ -102,7 +100,9 @@ func (a *GoRulesAnalyzer) AnalyzeWorkspace(
 		result.DurationMillis = time.Since(start).Milliseconds()
 		return result
 	}
-	defer root.Close()
+	defer func() {
+		_ = root.Close()
+	}()
 
 	err = filepath.WalkDir(
 		rootPath,
