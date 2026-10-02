@@ -46,12 +46,12 @@ jobs:
         run: |
           docker build \
             -f ./Dockerfile \
-            -t ghcr.io/${{ github.repository }}:latest \
-            -t ghcr.io/${{ github.repository }}:${{ github.sha }} \
+            -t ghcr.io/${GITHUB_REPOSITORY,,}:latest \
+            -t ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA} \
             .
 
       - name: Push Docker image
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          docker push ghcr.io/${{ github.repository }}:latest
-          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker push ghcr.io/${GITHUB_REPOSITORY,,}:latest
+          docker push ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}
