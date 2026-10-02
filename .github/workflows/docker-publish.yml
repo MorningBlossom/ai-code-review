@@ -74,7 +74,7 @@ jobs:
           docker build \
             -f ./Dockerfile \
             -t ghcr.io/${GITHUB_REPOSITORY,,}:latest \
-            -t ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA} \
+            -t ghcr.io/${GITHUB_REPOSITORY,,}:${{ steps.vars.outputs.sha }} \
             .
 
       - name: Push Docker image
