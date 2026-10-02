@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -112,7 +113,19 @@ func (h *GithubWebhookHandler) HandleWebhook(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+
+	log.Printf(
+		"webhook received method=%s path=%s remote=%s",
+		r.Method,
+		r.URL.Path,
+		r.RemoteAddr,
+	)
+
 	if r.Method != http.MethodPost {
+		log.Printf(
+			"webhook rejected reason=method_not_allowed method=%s",
+			r.Method,
+		)
 		http.Error(
 			w,
 			"method not allowed",
@@ -126,6 +139,10 @@ func (h *GithubWebhookHandler) HandleWebhook(
 			r.Body,
 			maxWebhookPayloadSize+1,
 		),
+	)
+	log.Printf(
+		"webhook payload accepted size=%d",
+		len(payload),
 	)
 	if err != nil {
 		http.Error(
@@ -152,6 +169,10 @@ func (h *GithubWebhookHandler) HandleWebhook(
 		signature,
 		h.webhookSecret,
 	); err != nil {
+		log.Printf(
+			"webhook rejected reason=invalid_signature delivery=%s",
+			r.Header.Get("X-GitHub-Delivery"),
+		)
 		http.Error(
 			w,
 			"invalid webhook signature",
@@ -162,6 +183,12 @@ func (h *GithubWebhookHandler) HandleWebhook(
 
 	eventType := r.Header.Get("X-GitHub-Event")
 	deliveryID := r.Header.Get("X-GitHub-Delivery")
+
+	log.Printf(
+		"webhook headers event=%s delivery=%s",
+		eventType,
+		deliveryID,
+	)
 
 	if eventType == "" {
 		http.Error(
@@ -183,6 +210,12 @@ func (h *GithubWebhookHandler) HandleWebhook(
 
 	switch eventType {
 	case "pull_request":
+
+		log.Printf(
+			"webhook dispatch event=pull_request delivery=%s",
+			deliveryID,
+		)
+
 		h.handlePullRequestEvent(
 			w,
 			r,
@@ -191,6 +224,12 @@ func (h *GithubWebhookHandler) HandleWebhook(
 		)
 
 	case "issue_comment":
+
+		log.Printf(
+			"webhook dispatch event=issue_comment delivery=%s",
+			deliveryID,
+		)
+
 		h.handleIssueCommentEvent(
 			w,
 			r,
@@ -199,6 +238,11 @@ func (h *GithubWebhookHandler) HandleWebhook(
 		)
 
 	default:
+		log.Printf(
+			"webhook ignored reason=unsupported_event event=%s delivery=%s",
+			eventType,
+			deliveryID,
+		)
 		w.WriteHeader(http.StatusAccepted)
 	}
 }
@@ -219,6 +263,16 @@ func (h *GithubWebhookHandler) handlePullRequestEvent(
 		)
 		return
 	}
+
+	log.Printf(
+		"pull_request event parsed action=%s org=%s repo=%s pr=%d draft=%t delivery=%s",
+		event.Action,
+		event.Repository.Owner.Login,
+		event.Repository.Name,
+		event.PullRequest.Number,
+		event.PullRequest.Draft,
+		deliveryID,
+	)
 
 	if event.Installation.ID == 0 {
 		http.Error(
@@ -295,28 +349,63 @@ func (h *GithubWebhookHandler) handlePullRequestEvent(
 	switch event.Action {
 	case "opened":
 		if event.PullRequest.Draft {
+
+			log.Printf(
+				"review ignored reason=draft_pr action=opened org=%s repo=%s pr=%d",
+				event.Repository.Owner.Login,
+				event.Repository.Name,
+				event.PullRequest.Number,
+			)
+
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 
 	case "ready_for_review":
 		if event.PullRequest.Draft {
+
+			log.Printf(
+				"review ignored reason=draft_pr action=ready_for_review org=%s repo=%s pr=%d",
+				event.Repository.Owner.Login,
+				event.Repository.Name,
+				event.PullRequest.Number,
+			)
+
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 
 	case "reopened":
 		if event.PullRequest.Draft {
+			log.Printf(
+				"review ignored reason=draft_pr action=reopened org=%s repo=%s pr=%d",
+				event.Repository.Owner.Login,
+				event.Repository.Name,
+				event.PullRequest.Number,
+			)
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 
 	case "synchronize":
+		log.Printf(
+			"review ignored reason=synchronize_not_auto_reviewed org=%s repo=%s pr=%d",
+			event.Repository.Owner.Login,
+			event.Repository.Name,
+			event.PullRequest.Number,
+		)
 		// New commits must NOT automatically trigger an AI review.
 		w.WriteHeader(http.StatusAccepted)
 		return
 
 	default:
+		log.Printf(
+			"review ignored reason=unsupported_pull_request_action action=%s org=%s repo=%s pr=%d",
+			event.Action,
+			event.Repository.Owner.Login,
+			event.Repository.Name,
+			event.PullRequest.Number,
+		)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -341,11 +430,28 @@ func (h *GithubWebhookHandler) handlePullRequestEvent(
 		ReviewPolicyVersion: "v1",
 	}
 
+	log.Printf(
+		"review starting mode=pull_request review_id=%s org=%s repo=%s pr=%d head=%s",
+		request.ReviewID,
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
+		request.HeadSHA,
+	)
+
 	_, err := h.orchestrator.Review(
 		r.Context(),
 		request,
 	)
 	if err != nil {
+		log.Printf(
+			"review failed mode=pull_request review_id=%s org=%s repo=%s pr=%d error=%v",
+			request.ReviewID,
+			request.Organization,
+			request.Repository,
+			request.PullRequestNumber,
+			err,
+		)
 		h.deliveryStore.Forget(deliveryID)
 
 		http.Error(
@@ -355,6 +461,14 @@ func (h *GithubWebhookHandler) handlePullRequestEvent(
 		)
 		return
 	}
+
+	log.Printf(
+		"review completed mode=pull_request review_id=%s org=%s repo=%s pr=%d",
+		request.ReviewID,
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
+	)
 
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -376,6 +490,16 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 		return
 	}
 
+	log.Printf(
+		"issue_comment event parsed action=%s org=%s repo=%s pr=%d user=%s delivery=%s",
+		event.Action,
+		event.Repository.Owner.Login,
+		event.Repository.Name,
+		event.Issue.Number,
+		event.Comment.User.Login,
+		deliveryID,
+	)
+
 	// issue_comment is emitted for normal Issues as well as PRs.
 	if event.Issue.PullRequest == nil {
 		w.WriteHeader(http.StatusAccepted)
@@ -387,9 +511,25 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 	)
 
 	if command != manualReviewCommand {
+		log.Printf(
+			"manual review ignored reason=command_not_matched org=%s repo=%s pr=%d command=%q",
+			event.Repository.Owner.Login,
+			event.Repository.Name,
+			event.Issue.Number,
+			command,
+		)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+
+	log.Printf(
+		"manual review command accepted command=%s org=%s repo=%s pr=%d delivery=%s",
+		manualReviewCommand,
+		event.Repository.Owner.Login,
+		event.Repository.Name,
+		event.Issue.Number,
+		deliveryID,
+	)
 
 	if event.Installation.ID == 0 {
 		http.Error(
@@ -436,6 +576,13 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 		return
 	}
 
+	log.Printf(
+		"manual review fetching current PR org=%s repo=%s pr=%d",
+		event.Repository.Owner.Login,
+		event.Repository.Name,
+		event.Issue.Number,
+	)
+
 	/*
 	   Always fetch the current PR.
 
@@ -450,6 +597,16 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 		event.Repository.Name,
 		event.Issue.Number,
 	)
+
+	log.Printf(
+		"manual review PR fetched org=%s repo=%s pr=%d draft=%t head=%s",
+		event.Repository.Owner.Login,
+		event.Repository.Name,
+		pr.Number,
+		pr.Draft,
+		pr.HeadSHA,
+	)
+
 	if err != nil {
 		h.deliveryStore.Forget(deliveryID)
 
@@ -463,6 +620,12 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 
 	// @mb-ai is ignored while the PR remains a draft.
 	if pr.Draft {
+		log.Printf(
+			"manual review ignored reason=draft_pr org=%s repo=%s pr=%d",
+			event.Repository.Owner.Login,
+			event.Repository.Name,
+			pr.Number,
+		)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -487,11 +650,29 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 		ReviewPolicyVersion: "v1",
 	}
 
+	log.Printf(
+		"review starting mode=manual_full_pr review_id=%s org=%s repo=%s pr=%d head=%s requested_by=%s",
+		request.ReviewID,
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
+		request.HeadSHA,
+		request.RequestedBy,
+	)
+
 	_, err = h.orchestrator.Review(
 		r.Context(),
 		request,
 	)
 	if err != nil {
+		log.Printf(
+			"review failed mode=manual_full_pr review_id=%s org=%s repo=%s pr=%d error=%v",
+			request.ReviewID,
+			request.Organization,
+			request.Repository,
+			request.PullRequestNumber,
+			err,
+		)
 		h.deliveryStore.Forget(deliveryID)
 
 		http.Error(
@@ -501,6 +682,14 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 		)
 		return
 	}
+
+	log.Printf(
+		"review completed mode=manual_full_pr review_id=%s org=%s repo=%s pr=%d",
+		request.ReviewID,
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
+	)
 
 	w.WriteHeader(http.StatusAccepted)
 }
