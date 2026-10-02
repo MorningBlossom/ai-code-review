@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/MorningBlossom/ai-code-review/config"
@@ -20,6 +24,10 @@ import (
 func main() {
 
 	appConfig := config.Load()
+
+	if err := appConfig.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
 
 	var githubClient github.Provider
 	var githubReviewClient publisher.GitHubReviewClient
@@ -39,17 +47,6 @@ func main() {
 		// Keep fake publishing in development.
 		githubReviewClient = nil
 	} else {
-		if appConfig.GitHubWebhookSecret == "" {
-			log.Fatal("GITHUB_WEBHOOK_SECRET is required")
-		}
-
-		if appConfig.GitHubAppID == 0 {
-			log.Fatal("GITHUB_APP_ID is required")
-		}
-
-		if appConfig.GitHubPrivateKeyPath == "" {
-			log.Fatal("GITHUB_PRIVATE_KEY_PATH is required")
-		}
 
 		appAuthenticator, err := github.NewGitHubAppAuthenticator(
 			github.AppConfig{
@@ -61,8 +58,12 @@ func main() {
 			log.Fatalf("failed to create GitHub App authenticator: %v", err)
 		}
 
+		githubHTTPClient := &http.Client{
+			Timeout: 30 * time.Second,
+		}
+
 		realGitHubClient := github.NewClient(
-			http.DefaultClient,
+			githubHTTPClient,
 			appAuthenticator,
 			"https://api.github.com",
 		)
@@ -131,21 +132,29 @@ func main() {
 		reviewPublisher,
 	)
 
-	githubWebhookHandler := api.NewGithubWebhookHandler(reviewOrchestrator, appConfig.GitHubWebhookSecret, deliveryStore)
+	githubWebhookHandler := api.NewGithubWebhookHandler(
+		reviewOrchestrator,
+		appConfig.GitHubWebhookSecret,
+		deliveryStore,
+		appConfig.GitHubOrganization,
+	)
 
-	handler := api.NewHandler(reviewOrchestrator)
+	handler := api.NewHandler(
+		reviewOrchestrator,
+		appConfig.APIToken,
+		appConfig.GitHubOrganization,
+	)
 
 	// routes
-	http.HandleFunc("/health", handler.Health)
-	http.HandleFunc(
-		"/github/webhook",
-		githubWebhookHandler.HandleWebhook,
-	)
-	http.HandleFunc("/reviews", handler.CreateReview)
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/health", handler.Health)
+	mux.HandleFunc("/github/webhook", githubWebhookHandler.HandleWebhook)
+	mux.HandleFunc("/reviews", handler.CreateReview)
 
 	server := &http.Server{
 		Addr:              ":8080",
-		Handler:           nil,
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -154,7 +163,43 @@ func main() {
 
 	log.Println("review API listening on :8080")
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	serverErrors := make(chan error, 1)
+
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	shutdownSignals := make(chan os.Signal, 1)
+
+	signal.Notify(
+		shutdownSignals,
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+
+	select {
+	case err := <-serverErrors:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server failed: %v", err)
+		}
+
+	case sig := <-shutdownSignals:
+		log.Printf("shutdown signal received: %s", sig)
 	}
+
+	shutdownContext, cancel := context.WithTimeout(
+		context.Background(),
+		30*time.Second,
+	)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownContext); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
+
+		if err := server.Close(); err != nil {
+			log.Printf("server close failed: %v", err)
+		}
+	}
+
+	log.Println("review API stopped")
 }

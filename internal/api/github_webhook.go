@@ -14,16 +14,18 @@ import (
 const maxWebhookPayloadSize = 5 << 20 // 5 MiB
 
 type GithubWebhookHandler struct {
-	orchestrator  orchestrator.Orchestrator
-	webhookSecret string
-	deliveryStore *DeliveryStore
+	orchestrator        orchestrator.Orchestrator
+	webhookSecret       string
+	deliveryStore       *DeliveryStore
+	allowedOrganization string
 }
 
-func NewGithubWebhookHandler(orchestrator orchestrator.Orchestrator, webhook string, store *DeliveryStore) *GithubWebhookHandler {
+func NewGithubWebhookHandler(orchestrator orchestrator.Orchestrator, webhook string, store *DeliveryStore, organisation string) *GithubWebhookHandler {
 	return &GithubWebhookHandler{
-		orchestrator:  orchestrator,
-		webhookSecret: webhook,
-		deliveryStore: store,
+		orchestrator:        orchestrator,
+		webhookSecret:       webhook,
+		deliveryStore:       store,
+		allowedOrganization: organisation,
 	}
 }
 
@@ -117,8 +119,8 @@ func (h *GithubWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if event.Repository.Owner.Login == "" {
-		http.Error(w, "missing repository owner", http.StatusBadRequest)
+	if event.Repository.Owner.Login != h.allowedOrganization {
+		http.Error(w, "unauthorized organization", http.StatusUnauthorized)
 		return
 	}
 

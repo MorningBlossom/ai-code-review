@@ -18,6 +18,7 @@ const testWebhookSecret = "test-secret"
 
 type failingWebhookTestOrchestrator struct {
 	calls int
+	err   error
 }
 
 func (f *failingWebhookTestOrchestrator) Review(
@@ -112,6 +113,7 @@ func TestGitHubWebhookHandler_ValidPullRequestOpened(t *testing.T) {
 		fakeOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	req := createWebhookRequest(
@@ -174,6 +176,7 @@ func TestGitHubWebhookHandler_SupportedActions(t *testing.T) {
 				fakeOrchestrator,
 				testWebhookSecret,
 				deliveryStore,
+				"MorningBlossom",
 			)
 
 			req := createWebhookRequest(
@@ -229,6 +232,7 @@ func TestGitHubWebhookHandler_UnsupportedAction(t *testing.T) {
 		fakeOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	req := createWebhookRequest(
@@ -277,6 +281,7 @@ func TestGitHubWebhookHandler_InvalidSignature(t *testing.T) {
 		fakeOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	rec := httptest.NewRecorder()
@@ -309,6 +314,7 @@ func TestGitHubWebhookHandler_InvalidJSON(t *testing.T) {
 		fakeOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	rec := httptest.NewRecorder()
@@ -343,6 +349,7 @@ func TestGitHubWebhookHandler_NonPullRequestEvent(t *testing.T) {
 		fakeOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	rec := httptest.NewRecorder()
@@ -372,6 +379,7 @@ func TestGitHubWebhookHandler_MethodNotAllowed(t *testing.T) {
 		fakeOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	rec := httptest.NewRecorder()
@@ -422,6 +430,7 @@ func TestGitHubWebhookHandler_DuplicateDelivery(t *testing.T) {
 		fakeOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	req1 := createWebhookRequest(
@@ -499,6 +508,7 @@ func TestGitHubWebhookHandler_RetriesFailedDelivery(t *testing.T) {
 		failingOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	req1 := createWebhookRequest(
@@ -569,6 +579,7 @@ func TestGitHubWebhookHandler_RequestBodyTooLarge(t *testing.T) {
 		fakeOrchestrator,
 		testWebhookSecret,
 		deliveryStore,
+		"MorningBlossom",
 	)
 
 	rec := httptest.NewRecorder()
@@ -585,5 +596,64 @@ func TestGitHubWebhookHandler_RequestBodyTooLarge(t *testing.T) {
 
 	if fakeOrchestrator.called {
 		t.Fatal("expected oversized request not to call orchestrator")
+	}
+}
+func TestGitHubWebhookHandler_RejectsUnauthorizedOrganization(t *testing.T) {
+	payload := `{
+		"action": "opened",
+		"installation": {
+			"id": 12345
+		},
+		"repository": {
+			"name": "test-repo",
+			"owner": {
+				"login": "UnauthorizedOrg"
+			}
+		},
+		"pull_request": {
+			"number": 10,
+			"user": {
+				"login": "test-user"
+			},
+			"base": {
+				"sha": "base-123"
+			},
+			"head": {
+				"sha": "head-123"
+			}
+		}
+	}`
+
+	req := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"pull_request",
+		"delivery-unauthorized-org",
+	)
+
+	orchestrator := &webhookTestOrchestrator{}
+	deliveryStore := NewDeliveryStore()
+
+	handler := NewGithubWebhookHandler(
+		orchestrator,
+		testWebhookSecret,
+		deliveryStore,
+		"MorningBlossom",
+	)
+
+	recorder := httptest.NewRecorder()
+
+	handler.HandleWebhook(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusUnauthorized,
+			recorder.Code,
+		)
+	}
+
+	if orchestrator.called {
+		t.Fatal("orchestrator should not be called for unauthorized organization")
 	}
 }
