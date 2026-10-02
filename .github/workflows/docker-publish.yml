@@ -91,7 +91,7 @@ jobs:
     steps:
       - name: Send repository_dispatch to Infra Repo
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
           SERVICE_NAME: ${{ github.event.repository.name }}
           TARGET_REPO: "MorningBlossom/release"
           IMAGE_PATH: "ghcr.io/${{ github.repository }}"
