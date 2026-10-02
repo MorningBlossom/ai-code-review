@@ -81,7 +81,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           docker push ghcr.io/${GITHUB_REPOSITORY,,}:latest
-          docker push ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}
+          docker push ghcr.io/${GITHUB_REPOSITORY,,}:${{ steps.vars.outputs.sha }}
 
   trigger-deployment:
     name: Trigger Deployment Dispatch
