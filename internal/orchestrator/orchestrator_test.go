@@ -442,9 +442,7 @@ func TestReviewOrchestrator_RunsAllWorkspaceAnalyzers(t *testing.T) {
 	}
 }
 
-func TestReviewOrchestrator_FailsWhenWorkspaceAnalyzerFails(
-	t *testing.T,
-) {
+func TestReviewOrchestrator_PublishesWhenWorkspaceAnalyzerFails(t *testing.T) {
 	githubProvider := &fakeGitHubProvider{}
 	modelProvider := &fakeModelProvider{}
 	findingValidator := &fakeValidator{}
@@ -460,89 +458,47 @@ func TestReviewOrchestrator_FailsWhenWorkspaceAnalyzerFails(
 
 	failingWorkspaceAnalyzer := workspaceAnalyzerFunc{
 		name: "go-vet",
-		fn: func(
-			ctx context.Context,
-			ws workspace.Workspace,
-		) review.AnalyzerResult {
+		fn: func(ctx context.Context, ws workspace.Workspace) review.AnalyzerResult {
 			return review.AnalyzerResult{
 				AnalyzerName: "go-vet",
-				Status:       "failed",
-				Diagnostics: []string{
-					"go vet execution failed",
-				},
+				Status: "failed",
+				Diagnostics: []string{"go vet execution failed: go: command not found"},
 			}
 		},
 	}
 
 	orchestrator := NewOrchestrator(
-		githubProvider,
-		contextBuilder,
-		workspaceBuilder,
-		nil,
-		[]analyzer.WorkspaceAnalyzer{
-			failingWorkspaceAnalyzer,
-		},
-		modelProvider,
-		findingValidator,
-		reviewPublisher,
+		githubProvider, contextBuilder, workspaceBuilder, nil,
+		[]analyzer.WorkspaceAnalyzer{failingWorkspaceAnalyzer},
+		modelProvider, findingValidator, reviewPublisher,
 	)
 
-	request := review.ReviewRequest{
-		ReviewID:          "review-failure",
-		InstallationID:    123,
-		Organization:      "MorningBlossom",
-		Repository:        "test-repository",
-		PullRequestNumber: 1,
-		BaseSHA:           "base-sha",
-		HeadSHA:           "head-sha",
-		RequestedAt:       time.Now(),
+	result, err := orchestrator.Review(context.Background(), review.ReviewRequest{
+		ReviewID: "review-failure", InstallationID: 123,
+		Organization: "MorningBlossom", Repository: "test-repository",
+		PullRequestNumber: 1, BaseSHA: "base-sha", HeadSHA: "head-sha",
+		RequestedAt: time.Now(),
+	})
+
+	if err != nil {
+		t.Fatalf("expected analyzer failure to be published, got %v", err)
 	}
-
-	result, err := orchestrator.Review(
-		context.Background(),
-		request,
-	)
-
-	if err == nil {
-		t.Fatal("expected analyzer failure error")
+	if result.Status != "completed_with_analyzer_failures" {
+		t.Fatalf("expected analyzer failure status, got %q", result.Status)
 	}
-
-	if result.Status != "failed" {
-		t.Fatalf(
-			"expected failed status, got %q",
-			result.Status,
-		)
-	}
-
 	if len(result.AnalyzerSummary) != 1 {
-		t.Fatalf(
-			"expected one analyzer result, got %d",
-			len(result.AnalyzerSummary),
-		)
+		t.Fatalf("expected one analyzer result, got %d", len(result.AnalyzerSummary))
 	}
-
 	if modelProvider.calls != 0 {
-		t.Fatalf(
-			"expected model provider not to be called, got %d calls",
-			modelProvider.calls,
-		)
+		t.Fatalf("expected model not to be called, got %d calls", modelProvider.calls)
 	}
-
 	if findingValidator.contextCalls != 0 {
-		t.Fatalf(
-			"expected validator not to be called, got %d calls",
-			findingValidator.contextCalls,
-		)
+		t.Fatalf("expected validator not to be called, got %d calls", findingValidator.contextCalls)
 	}
-
-	if reviewPublisher.calls != 0 {
-		t.Fatalf(
-			"expected publisher not to be called, got %d calls",
-			reviewPublisher.calls,
-		)
+	if reviewPublisher.calls != 1 {
+		t.Fatalf("expected publisher to be called once, got %d calls", reviewPublisher.calls)
 	}
 }
-
 func TestReviewOrchestrator_PassesAnalyzerFindingsToModel(
 	t *testing.T,
 ) {
