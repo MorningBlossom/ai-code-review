@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -431,7 +432,7 @@ func (h *GithubWebhookHandler) handlePullRequestEvent(
 	}
 
 	log.Printf(
-		"review starting mode=pull_request review_id=%s org=%s repo=%s pr=%d head=%s",
+		"review queued mode=pull_request review_id=%s org=%s repo=%s pr=%d head=%s",
 		request.ReviewID,
 		request.Organization,
 		request.Repository,
@@ -439,37 +440,11 @@ func (h *GithubWebhookHandler) handlePullRequestEvent(
 		request.HeadSHA,
 	)
 
-	_, err := h.orchestrator.Review(
-		r.Context(),
-		request,
-	)
-	if err != nil {
-		log.Printf(
-			"review failed mode=pull_request review_id=%s org=%s repo=%s pr=%d error=%v",
-			request.ReviewID,
-			request.Organization,
-			request.Repository,
-			request.PullRequestNumber,
-			err,
-		)
-		h.deliveryStore.Forget(deliveryID)
+	h.startBackgroundReview(request, deliveryID)
 
-		http.Error(
-			w,
-			"review failed",
-			http.StatusInternalServerError,
-		)
-		return
-	}
-
-	log.Printf(
-		"review completed mode=pull_request review_id=%s org=%s repo=%s pr=%d",
-		request.ReviewID,
-		request.Organization,
-		request.Repository,
-		request.PullRequestNumber,
-	)
-
+	// GitHub expects the webhook endpoint to acknowledge deliveries quickly.
+	// The review itself can take much longer because it runs analyzers, the
+	// model, validation, and GitHub publishing.
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -576,60 +551,6 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 		return
 	}
 
-	log.Printf(
-		"manual review fetching current PR org=%s repo=%s pr=%d",
-		event.Repository.Owner.Login,
-		event.Repository.Name,
-		event.Issue.Number,
-	)
-
-	/*
-	   Always fetch the current PR.
-
-	   This ensures @mb-ai reviews the latest commit rather than
-	   using potentially stale information from the issue_comment
-	   payload.
-	*/
-	pr, err := h.github.GetPullRequest(
-		r.Context(),
-		event.Installation.ID,
-		event.Repository.Owner.Login,
-		event.Repository.Name,
-		event.Issue.Number,
-	)
-
-	log.Printf(
-		"manual review PR fetched org=%s repo=%s pr=%d draft=%t head=%s",
-		event.Repository.Owner.Login,
-		event.Repository.Name,
-		pr.Number,
-		pr.Draft,
-		pr.HeadSHA,
-	)
-
-	if err != nil {
-		h.deliveryStore.Forget(deliveryID)
-
-		http.Error(
-			w,
-			"failed to fetch pull request",
-			http.StatusInternalServerError,
-		)
-		return
-	}
-
-	// @mb-ai is ignored while the PR remains a draft.
-	if pr.Draft {
-		log.Printf(
-			"manual review ignored reason=draft_pr org=%s repo=%s pr=%d",
-			event.Repository.Owner.Login,
-			event.Repository.Name,
-			pr.Number,
-		)
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-
 	if h.deliveryStore.Seen(deliveryID) {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -640,9 +561,7 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 		InstallationID:      event.Installation.ID,
 		Organization:        event.Repository.Owner.Login,
 		Repository:          event.Repository.Name,
-		PullRequestNumber:   pr.Number,
-		BaseSHA:             pr.BaseSHA,
-		HeadSHA:             pr.HeadSHA,
+		PullRequestNumber:   event.Issue.Number,
 		EventType:           "issue_comment",
 		RequestedBy:         event.Comment.User.Login,
 		RequestedAt:         time.Now().UTC(),
@@ -651,22 +570,76 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 	}
 
 	log.Printf(
-		"review starting mode=manual_full_pr review_id=%s org=%s repo=%s pr=%d head=%s requested_by=%s",
+		"manual review queued mode=manual_full_pr review_id=%s org=%s repo=%s pr=%d requested_by=%s",
 		request.ReviewID,
 		request.Organization,
 		request.Repository,
 		request.PullRequestNumber,
-		request.HeadSHA,
 		request.RequestedBy,
 	)
 
-	_, err = h.orchestrator.Review(
-		r.Context(),
-		request,
+	go h.runManualReview(request, deliveryID)
+
+	// Acknowledge the GitHub delivery immediately. Fetching the current PR and
+	// running the review happen in the background.
+	w.WriteHeader(http.StatusAccepted)
+}
+
+
+func (h *GithubWebhookHandler) startBackgroundReview(
+	request review.ReviewRequest,
+	deliveryID string,
+) {
+	go func() {
+		_, err := h.orchestrator.Review(
+			context.Background(),
+			request,
+		)
+		if err != nil {
+			log.Printf(
+				"background review failed mode=%s review_id=%s org=%s repo=%s pr=%d error=%v",
+				request.ReviewMode,
+				request.ReviewID,
+				request.Organization,
+				request.Repository,
+				request.PullRequestNumber,
+				err,
+			)
+			h.deliveryStore.Forget(deliveryID)
+			return
+		}
+
+		log.Printf(
+			"background review completed mode=%s review_id=%s org=%s repo=%s pr=%d",
+			request.ReviewMode,
+			request.Organization,
+			request.Repository,
+			request.PullRequestNumber,
+		)
+	}()
+}
+
+func (h *GithubWebhookHandler) runManualReview(
+	request review.ReviewRequest,
+	deliveryID string,
+) {
+	log.Printf(
+		"manual review fetching current PR org=%s repo=%s pr=%d",
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
+	)
+
+	pr, err := h.github.GetPullRequest(
+		context.Background(),
+		request.InstallationID,
+		request.Organization,
+		request.Repository,
+		request.PullRequestNumber,
 	)
 	if err != nil {
 		log.Printf(
-			"review failed mode=manual_full_pr review_id=%s org=%s repo=%s pr=%d error=%v",
+			"manual review failed stage=get_pull_request review_id=%s org=%s repo=%s pr=%d error=%v",
 			request.ReviewID,
 			request.Organization,
 			request.Repository,
@@ -674,22 +647,32 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 			err,
 		)
 		h.deliveryStore.Forget(deliveryID)
-
-		http.Error(
-			w,
-			"review failed",
-			http.StatusInternalServerError,
-		)
 		return
 	}
 
 	log.Printf(
-		"review completed mode=manual_full_pr review_id=%s org=%s repo=%s pr=%d",
-		request.ReviewID,
+		"manual review PR fetched org=%s repo=%s pr=%d draft=%t head=%s",
 		request.Organization,
 		request.Repository,
-		request.PullRequestNumber,
+		pr.Number,
+		pr.Draft,
+		pr.HeadSHA,
 	)
 
-	w.WriteHeader(http.StatusAccepted)
+	if pr.Draft {
+		log.Printf(
+			"manual review ignored reason=draft_pr org=%s repo=%s pr=%d",
+			request.Organization,
+			request.Repository,
+			pr.Number,
+		)
+		h.deliveryStore.Forget(deliveryID)
+		return
+	}
+
+	request.BaseSHA = pr.BaseSHA
+	request.HeadSHA = pr.HeadSHA
+	request.PullRequestNumber = pr.Number
+
+	h.startBackgroundReview(request, deliveryID)
 }
