@@ -145,6 +145,11 @@ Return findings using this JSON structure:
 
 Rules:
 - Only report issues supported by the supplied code.
+- For security-sensitive code, trace data flow from untrusted or externally influenced inputs to sensitive sinks before deciding whether the code is safe.
+- When a value is used to establish a security boundary, such as a filesystem root or allowed directory, verify whether that value is itself attacker-controlled.
+- Do not treat path-scoping helpers, sanitizers, validation helpers, or wrappers as proof of safety without checking what input reaches them.
+- For filesystem operations, consider path traversal, absolute paths, dot segments, symlink behavior, and attacker-controlled roots where applicable.
+- For subprocesses, trace arguments to the executable and distinguish fixed executables from attacker-controlled executable paths or shell interpretation.
 - file_path must refer to a supplied file.
 - Line numbers must refer to the supplied source.
 - Prefer changed code.
