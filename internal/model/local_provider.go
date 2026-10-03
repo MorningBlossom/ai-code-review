@@ -169,6 +169,16 @@ Focus on:
 - test quality
 - Go and microservice-specific problems
 
+For security-sensitive code, perform explicit data-flow and trust-boundary analysis:
+- Trace externally influenced or user-controlled values from their origin to security-sensitive sinks.
+- Check filesystem paths for traversal, absolute-path injection, unsafe roots, symlink risks, and unsafe permissions.
+- Check subprocesses and command execution for injection or unsafe argument construction.
+- Check authentication, authorization, secrets, deserialization, SQL/query construction, SSRF, and resource-exhaustion risks.
+- Do not assume a security boundary is sufficient merely because a helper such as os.Root, a sanitizer, or a validation function exists.
+- Verify what input controls the security boundary itself. If attacker-controlled input selects the root, directory, namespace, credential, or other boundary, continue tracing from that boundary.
+- For path handling, explicitly consider inputs such as ../target, ../../target, /tmp/target, ., and .. when relevant.
+- Report a security finding when the supplied code demonstrates a concrete trust-boundary violation, even if a downstream API partially constrains the operation.
+
 Do not report:
 - stylistic preferences without engineering impact
 - issues unrelated to the supplied code
