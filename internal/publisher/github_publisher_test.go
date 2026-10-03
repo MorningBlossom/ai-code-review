@@ -515,3 +515,56 @@ func TestGitHubPublisher_Publish_NonInlineFindingsRemainInSummary(
 		)
 	}
 }
+
+func TestGitHubPublisher_Publish_AnalyzerFailureContainsRemediation(t *testing.T) {
+	client := &fakeGitHubReviewClient{}
+	p := NewGitHubPublisher(client)
+
+	request := review.ReviewRequest{
+		InstallationID: 456,
+		Organization: "MorningBlossom",
+		Repository: "example-repo",
+		PullRequestNumber: 42,
+		HeadSHA: "head-123",
+		ReviewPolicyVersion: "v1",
+		ReviewMode: "manual_full_pr",
+	}
+
+	result := review.ReviewResult{
+		Status: "completed_with_analyzer_failures",
+		AnalyzerSummary: []review.AnalyzerResult{
+			{
+				AnalyzerName: "gofmt",
+				Status: "failed",
+				Diagnostics: []string{
+					"gofmt execution failed for main.go: executable file not found",
+				},
+			},
+		},
+	}
+
+	if err := p.Publish(context.Background(), request, result); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.createCalls != 1 {
+		t.Fatalf("expected one GitHub review creation, got %d", client.createCalls)
+	}
+
+	for _, expected := range []string{
+		"gofmt analyzer failed",
+		"gofmt execution failed for main.go",
+		"gofmt -w .",
+		"Format the Go source files",
+		"@mb-ai",
+		"AI model review was skipped",
+	} {
+		if !strings.Contains(client.review.Body, expected) {
+			t.Fatalf("expected review body to contain %q, got:\n%s", expected, client.review.Body)
+		}
+	}
+
+	if len(client.review.Comments) != 0 {
+		t.Fatalf("expected no inline comments for analyzer failure, got %d", len(client.review.Comments))
+	}
+}
