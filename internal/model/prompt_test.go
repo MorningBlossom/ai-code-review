@@ -62,3 +62,35 @@ func TestBuildReviewPrompt_IncludesAnalyzerFindings(t *testing.T) {
 		}
 	}
 }
+
+
+func TestBuildReviewPrompt_IncludesSecurityDataFlowGuidance(t *testing.T) {
+	reviewContext := review.ReviewContext{
+		PullRequestTitle: "Harden service generation",
+		SourceFiles: []review.SourceFile{
+			{
+				Path: "generator.go",
+				Content: "func GenerateService(serviceName string) error { return nil }",
+			},
+		},
+	}
+
+	prompt := buildReviewPrompt(reviewContext)
+
+	expectedStrings := []string{
+		"trace data flow from untrusted or externally influenced inputs to sensitive sinks",
+		"verify whether that value is itself attacker-controlled",
+		"path traversal",
+		"attacker-controlled roots",
+	}
+
+	for _, expected := range expectedStrings {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf(
+				"expected security guidance %q in prompt\nprompt:\n%s",
+				expected,
+				prompt,
+			)
+		}
+	}
+}
