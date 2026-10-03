@@ -185,48 +185,17 @@ func (o *ReviewOrchestrator) Review(
 		request.ReviewID,
 	)
 
-	// Run analyzers that operate directly on the review context.
+	// Run all context analyzers. Analyzer failures are collected and published
+	// together so one unavailable tool does not hide failures from other tools.
 	for _, currentAnalyzer := range o.analyzers {
+		log.Printf("analyzer started review_id=%s analyzer=%s", request.ReviewID, currentAnalyzer.Name())
+		analyzerResult := currentAnalyzer.Analyze(ctx, reviewContext)
 		log.Printf(
-			"analyzer started review_id=%s",
-			request.ReviewID,
+			"analyzer completed review_id=%s analyzer=%s status=%s findings=%d diagnostics=%d",
+			request.ReviewID, analyzerResult.AnalyzerName, analyzerResult.Status,
+			len(analyzerResult.Findings), len(analyzerResult.Diagnostics),
 		)
-
-		analyzerResult := currentAnalyzer.Analyze(
-			ctx,
-			reviewContext,
-		)
-
-		log.Printf(
-			"analyzer completed review_id=%s analyzer=%s status=%s findings=%d",
-			request.ReviewID,
-			analyzerResult.AnalyzerName,
-			analyzerResult.Status,
-			len(analyzerResult.Findings),
-		)
-
-		appendAnalyzerResult(
-			&result,
-			&reviewContext,
-			analyzerResult,
-		)
-
-		if analyzerResult.Status == "failed" {
-			log.Printf(
-				"orchestrator failed review_id=%s stage=analyzer analyzer=%s",
-				request.ReviewID,
-				analyzerResult.AnalyzerName,
-			)
-
-			return o.failResult(
-				result,
-				start,
-				fmt.Errorf(
-					"analyzer %s failed",
-					analyzerResult.AnalyzerName,
-				),
-			)
-		}
+		appendAnalyzerResult(&result, &reviewContext, analyzerResult)
 	}
 
 	// Build a complete repository workspace for repository-level analyzers.
@@ -318,22 +287,8 @@ func (o *ReviewOrchestrator) Review(
 				analyzerResult,
 			)
 
-			if analyzerResult.Status == "failed" {
-				log.Printf(
-					"orchestrator failed review_id=%s stage=workspace_analyzer analyzer=%s",
-					request.ReviewID,
-					analyzerResult.AnalyzerName,
-				)
-
-				return o.failResult(
-					result,
-					start,
-					fmt.Errorf(
-						"workspace analyzer %s failed",
-						analyzerResult.AnalyzerName,
-					),
-				)
-			}
+			// Keep running all analyzers. Failures are handled after the full
+			// analyzer set has completed and are published as developer feedback.
 		}
 
 		log.Printf(
@@ -343,6 +298,20 @@ func (o *ReviewOrchestrator) Review(
 		)
 	}
 
+	// Do not invoke the model when any analyzer failed. The analyzer result
+	// contains the diagnostics needed by the publisher to produce an actionable
+	// PR message.
+	if hasAnalyzerFailures(result) {
+		result.Status = "completed_with_analyzer_failures"
+		result.DurationMillis = time.Since(start).Milliseconds()
+		log.Printf("analyzer failures detected review_id=%s failures=%d", request.ReviewID, countAnalyzerFailures(result))
+
+		if err := o.publisher.Publish(ctx, request, result); err != nil {
+			return o.failResult(result, start, fmt.Errorf("publish review: %w", err))
+		}
+
+		return result, nil
+	}
 	// Run the model review.
 	log.Printf(
 		"model review started review_id=%s",
@@ -456,6 +425,19 @@ func (o *ReviewOrchestrator) Review(
 	return result, nil
 }
 
+func hasAnalyzerFailures(result review.ReviewResult) bool {
+	return countAnalyzerFailures(result) > 0
+}
+
+func countAnalyzerFailures(result review.ReviewResult) int {
+	count := 0
+	for _, analyzerResult := range result.AnalyzerSummary {
+		if analyzerResult.Status == "failed" {
+			count++
+		}
+	}
+	return count
+}
 func (o *ReviewOrchestrator) failResult(
 	result review.ReviewResult,
 	start time.Time,
