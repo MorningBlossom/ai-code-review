@@ -11,6 +11,7 @@ import (
 	"github.com/MorningBlossom/ai-code-review/internal/contextbuilder"
 	"github.com/MorningBlossom/ai-code-review/internal/github"
 	"github.com/MorningBlossom/ai-code-review/internal/review"
+	"github.com/MorningBlossom/ai-code-review/internal/validator"
 	"github.com/MorningBlossom/ai-code-review/internal/workspace"
 )
 
@@ -492,13 +493,98 @@ func TestReviewOrchestrator_PublishesWhenWorkspaceAnalyzerFails(t *testing.T) {
 	if modelProvider.calls != 0 {
 		t.Fatalf("expected model not to be called, got %d calls", modelProvider.calls)
 	}
-	if findingValidator.contextCalls != 0 {
-		t.Fatalf("expected validator not to be called, got %d calls", findingValidator.contextCalls)
+	if findingValidator.contextCalls != 1 {
+		t.Fatalf("expected context-aware validator to be called once, got %d calls", findingValidator.contextCalls)
 	}
 	if reviewPublisher.calls != 1 {
 		t.Fatalf("expected publisher to be called once, got %d calls", reviewPublisher.calls)
 	}
 }
+func TestReviewOrchestrator_ValidatesAnalyzerFindingsBeforePublish(t *testing.T) {
+	githubProvider := &fakeGitHubProvider{}
+	modelProvider := &fakeModelProvider{}
+	reviewPublisher := &fakePublisher{}
+	workspaceBuilder := &fakeWorkspaceBuilder{}
+
+	contextBuilder := contextbuilder.NewBuilder(
+		githubProvider,
+		20,
+		200_000,
+		50_000,
+	)
+
+	failingAnalyzer := workspaceAnalyzerFunc{
+		name: "go-vet",
+		fn: func(ctx context.Context, ws workspace.Workspace) review.AnalyzerResult {
+			return review.AnalyzerResult{
+				AnalyzerName: "go-vet",
+				Status:       "failed",
+				Findings: []review.ReviewFinding{
+					{
+						FindingID:   "invalid-line",
+						Source:      "go-vet",
+						Category:    "correctness",
+						Severity:    "high",
+						Confidence:  1,
+						Title:       "Invalid line location",
+						Explanation: "This line is outside the supplied PR patch.",
+						FilePath:    "main.go",
+						StartLine:   10,
+						EndLine:     10,
+					},
+				},
+				Diagnostics: []string{"go vet failed"},
+			}
+		},
+	}
+
+	orchestrator := NewOrchestrator(
+		githubProvider,
+		contextBuilder,
+		workspaceBuilder,
+		nil,
+		[]analyzer.WorkspaceAnalyzer{failingAnalyzer},
+		modelProvider,
+		validator.NewFindingValidator(),
+		reviewPublisher,
+	)
+
+	result, err := orchestrator.Review(
+		context.Background(),
+		review.ReviewRequest{
+			ReviewID:          "review-analyzer-invalid-line",
+			InstallationID:    123,
+			Organization:      "MorningBlossom",
+			Repository:        "test-repository",
+			PullRequestNumber: 1,
+			BaseSHA:           "base-sha",
+			HeadSHA:           "head-sha",
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected analyzer failure to be published, got %v", err)
+	}
+
+	if result.Status != "completed_with_analyzer_failures" {
+		t.Fatalf("expected analyzer failure status, got %q", result.Status)
+	}
+
+	if len(result.Findings) != 0 {
+		t.Fatalf(
+			"expected invalid analyzer finding to be filtered before publishing, got %d findings",
+			len(result.Findings),
+		)
+	}
+
+	if modelProvider.calls != 0 {
+		t.Fatalf("expected model not to be called, got %d calls", modelProvider.calls)
+	}
+
+	if reviewPublisher.calls != 1 {
+		t.Fatalf("expected publisher to be called once, got %d calls", reviewPublisher.calls)
+	}
+}
+
 func TestReviewOrchestrator_PassesAnalyzerFindingsToModel(
 	t *testing.T,
 ) {
