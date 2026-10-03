@@ -78,7 +78,7 @@ func TestBuildReviewPrompt_IncludesSecurityDataFlowGuidance(t *testing.T) {
 	prompt := buildReviewPrompt(reviewContext)
 
 	expectedStrings := []string{
-		"Trace data flow from untrusted or externally influenced inputs to sensitive sinks",
+		"trace data flow from untrusted or externally influenced inputs to sensitive sinks",
 		"verify whether that value is itself attacker-controlled",
 		"path traversal",
 		"attacker-controlled roots",
