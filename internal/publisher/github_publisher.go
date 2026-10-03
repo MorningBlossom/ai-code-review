@@ -137,12 +137,28 @@ func hasPublishedReview(
 			continue
 		}
 
-		if containsReviewMarker(existingReview.Body, marker) {
-			return true
+		if !containsReviewMarker(existingReview.Body, marker) {
+			continue
 		}
+
+		// Analyzer-failure reviews are retryable. The same commit can be
+		// reviewed again after the analyzer environment or repository has been
+		// fixed, so they must not suppress a later @mb-ai/manual review.
+		if isAnalyzerFailureReview(existingReview.Body) {
+			continue
+		}
+
+		return true
 	}
 
 	return false
+}
+
+func isAnalyzerFailureReview(body string) bool {
+	return strings.Contains(
+		body,
+		"Review could not be completed because one or more analyzers failed.",
+	)
 }
 
 func buildReviewBody(
