@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	maxWebhookPayloadSize = 5 << 20 // 5 MiB
-	manualReviewCommand   = "@mb-ai"
+	maxWebhookPayloadSize  = 5 << 20 // 5 MiB
+	manualReviewCommand    = "@mb-ai"
+	backgroundReviewTimeout = 15 * time.Minute
 )
 
 type GithubWebhookHandler struct {
@@ -597,8 +598,14 @@ func (h *GithubWebhookHandler) startBackgroundReview(
 	deliveryID string,
 ) {
 	h.backgroundRunner(func() {
-		_, err := h.orchestrator.Review(
+		ctx, cancel := context.WithTimeout(
 			context.Background(),
+			backgroundReviewTimeout,
+		)
+		defer cancel()
+
+		_, err := h.orchestrator.Review(
+			ctx,
 			request,
 		)
 		if err != nil {
