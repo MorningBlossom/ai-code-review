@@ -40,6 +40,7 @@ func (w *TempWorkspace) Run(
 	}
 
 	cmd.Dir = w.root
+	cmd.Env = constrainedAnalyzerEnv()
 
 	stdout, err := cmd.Output()
 
@@ -115,4 +116,12 @@ func newAllowedWorkspaceCommand(
 			args,
 		)
 	}
+}
+
+func constrainedAnalyzerEnv() []string {
+	return append(os.Environ(),
+		"GOMAXPROCS=2",
+		"GOFLAGS=-p=1",
+		"GOMEMLIMIT=384MiB",
+	)
 }
