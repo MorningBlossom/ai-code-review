@@ -25,6 +25,7 @@ type GithubWebhookHandler struct {
 	webhookSecret       string
 	deliveryStore       *DeliveryStore
 	allowedOrganization string
+	backgroundRunner    func(func())
 }
 
 func NewGithubWebhookHandler(
@@ -40,6 +41,9 @@ func NewGithubWebhookHandler(
 		webhookSecret:       webhook,
 		deliveryStore:       store,
 		allowedOrganization: organisation,
+		backgroundRunner: func(fn func()) {
+			go fn()
+		},
 	}
 }
 
@@ -578,7 +582,9 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 		request.RequestedBy,
 	)
 
-	go h.runManualReview(request, deliveryID)
+	h.backgroundRunner(func() {
+		h.runManualReview(request, deliveryID)
+	})
 
 	// Acknowledge the GitHub delivery immediately. Fetching the current PR and
 	// running the review happen in the background.
@@ -590,7 +596,7 @@ func (h *GithubWebhookHandler) startBackgroundReview(
 	request review.ReviewRequest,
 	deliveryID string,
 ) {
-	go func() {
+	h.backgroundRunner(func() {
 		_, err := h.orchestrator.Review(
 			context.Background(),
 			request,
@@ -616,7 +622,7 @@ func (h *GithubWebhookHandler) startBackgroundReview(
 			request.Repository,
 			request.PullRequestNumber,
 		)
-	}()
+	})
 }
 
 func (h *GithubWebhookHandler) runManualReview(
