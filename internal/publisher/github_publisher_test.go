@@ -353,6 +353,59 @@ func TestGitHubPublisher_Publish_SkipsDuplicateManualReview(
 	}
 }
 
+
+func TestGitHubPublisher_Publish_RetriesPreviousAnalyzerFailureReview(t *testing.T) {
+	client := &fakeGitHubReviewClient{
+		existingReviews: []github.PullRequestReviewInfo{
+			{
+				ID:        102,
+				UserLogin: "ai-code-review-bot",
+				CommitSHA: "head-123",
+				Body: "<!-- ai-code-review:" +
+					"MorningBlossom/example-repo/pr-42/" +
+					"head-123/v1/manual_full_pr -->" +
+					"\n\n## AI Code Review\n\n" +
+					"⚠️ Review could not be completed because one or more analyzers failed.",
+			},
+		},
+	}
+
+	publisher := NewGitHubPublisher(client)
+
+	request := review.ReviewRequest{
+		ReviewID:            "manual-review-retry",
+		InstallationID:      456,
+		Organization:        "MorningBlossom",
+		Repository:          "example-repo",
+		PullRequestNumber:   42,
+		HeadSHA:             "head-123",
+		ReviewPolicyVersion: "v1",
+		ReviewMode:          "manual_full_pr",
+	}
+
+	result := review.ReviewResult{
+		Status: "completed_with_analyzer_failures",
+		AnalyzerSummary: []review.AnalyzerResult{
+			{
+				AnalyzerName: "gofmt",
+				Status:       "failed",
+				Diagnostics:  []string{"gofmt execution failed"},
+			},
+		},
+	}
+
+	if err := publisher.Publish(context.Background(), request, result); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.createCalls != 1 {
+		t.Fatalf(
+			"expected retry to create a new GitHub review, got %d calls",
+			client.createCalls,
+		)
+	}
+}
+
 func TestGitHubPublisher_Publish_FailsWhenListingReviewsFails(
 	t *testing.T,
 ) {
