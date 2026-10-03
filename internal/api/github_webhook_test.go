@@ -249,6 +249,78 @@ func TestGitHubWebhookHandler_AcknowledgesBeforeReviewCompletes(t *testing.T) {
 	close(orchestrator.release)
 }
 
+type contextCaptureWebhookOrchestrator struct {
+	ctx context.Context
+}
+
+func (f *contextCaptureWebhookOrchestrator) Review(
+	ctx context.Context,
+	_ review.ReviewRequest,
+) (review.ReviewResult, error) {
+	f.ctx = ctx
+	return review.ReviewResult{Status: "completed"}, nil
+}
+
+func TestGitHubWebhookHandler_BackgroundReviewUsesIndependentContext(
+	t *testing.T,
+) {
+	orchestrator := &contextCaptureWebhookOrchestrator{}
+	handler := NewGithubWebhookHandler(
+		orchestrator,
+		&webhookTestGitHubProvider{},
+		testWebhookSecret,
+		NewDeliveryStore(),
+		"MorningBlossom",
+	)
+
+	var background func()
+	handler.backgroundRunner = func(fn func()) {
+		background = fn
+	}
+
+	payload := pullRequestPayload(
+		"opened",
+		false,
+		"base-123",
+		"head-456",
+	)
+
+	req := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"pull_request",
+		"delivery-independent-context",
+	)
+
+	rec := httptest.NewRecorder()
+	handler.HandleWebhook(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusAccepted,
+			rec.Code,
+		)
+	}
+
+	if background == nil {
+		t.Fatal("expected background review to be queued")
+	}
+
+	background()
+
+	if orchestrator.ctx == nil {
+		t.Fatal("expected orchestrator to receive a background context")
+	}
+
+	if err := orchestrator.ctx.Err(); err != nil {
+		t.Fatalf(
+			"expected background review context to remain active after webhook acknowledgement, got %v",
+			err,
+		)
+	}
+}
+
 func TestGitHubWebhookHandler_ReadyPROpenedTriggersReview(t *testing.T) {
 	payload := `{
 "action": "opened",
