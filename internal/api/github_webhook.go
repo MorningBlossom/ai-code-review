@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	maxWebhookPayloadSize  = 5 << 20 // 5 MiB
-	manualReviewCommand    = "@mb-ai"
+	maxWebhookPayloadSize   = 5 << 20 // 5 MiB
+	manualReviewCommand     = "@mb-ai"
 	backgroundReviewTimeout = 15 * time.Minute
 )
 
@@ -592,7 +592,6 @@ func (h *GithubWebhookHandler) handleIssueCommentEvent(
 	w.WriteHeader(http.StatusAccepted)
 }
 
-
 func (h *GithubWebhookHandler) startBackgroundReview(
 	request review.ReviewRequest,
 	deliveryID string,
@@ -625,6 +624,7 @@ func (h *GithubWebhookHandler) startBackgroundReview(
 		log.Printf(
 			"background review completed mode=%s review_id=%s org=%s repo=%s pr=%d",
 			request.ReviewMode,
+			request.ReviewID,
 			request.Organization,
 			request.Repository,
 			request.PullRequestNumber,

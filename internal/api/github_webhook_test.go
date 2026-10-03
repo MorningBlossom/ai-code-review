@@ -250,14 +250,19 @@ func TestGitHubWebhookHandler_AcknowledgesBeforeReviewCompletes(t *testing.T) {
 }
 
 type contextCaptureWebhookOrchestrator struct {
-	ctx context.Context
+	ctxErr      error
+	hasDeadline bool
+	deadline    time.Time
 }
 
 func (f *contextCaptureWebhookOrchestrator) Review(
 	ctx context.Context,
 	_ review.ReviewRequest,
 ) (review.ReviewResult, error) {
-	f.ctx = ctx
+	f.ctxErr = ctx.Err()
+
+	f.deadline, f.hasDeadline = ctx.Deadline()
+
 	return review.ReviewResult{Status: "completed"}, nil
 }
 
@@ -265,6 +270,7 @@ func TestGitHubWebhookHandler_BackgroundReviewUsesIndependentContext(
 	t *testing.T,
 ) {
 	orchestrator := &contextCaptureWebhookOrchestrator{}
+
 	handler := NewGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
@@ -274,6 +280,7 @@ func TestGitHubWebhookHandler_BackgroundReviewUsesIndependentContext(
 	)
 
 	var background func()
+
 	handler.backgroundRunner = func(fn func()) {
 		background = fn
 	}
@@ -293,6 +300,7 @@ func TestGitHubWebhookHandler_BackgroundReviewUsesIndependentContext(
 	)
 
 	rec := httptest.NewRecorder()
+
 	handler.HandleWebhook(rec, req)
 
 	if rec.Code != http.StatusAccepted {
@@ -309,14 +317,21 @@ func TestGitHubWebhookHandler_BackgroundReviewUsesIndependentContext(
 
 	background()
 
-	if orchestrator.ctx == nil {
-		t.Fatal("expected orchestrator to receive a background context")
+	if orchestrator.ctxErr != nil {
+		t.Fatalf(
+			"expected background review context to be active while Review was running, got %v",
+			orchestrator.ctxErr,
+		)
 	}
 
-	if err := orchestrator.ctx.Err(); err != nil {
+	if !orchestrator.hasDeadline {
+		t.Fatal("expected background review context to have a deadline")
+	}
+
+	if !orchestrator.deadline.After(time.Now()) {
 		t.Fatalf(
-			"expected background review context to remain active after webhook acknowledgement, got %v",
-			err,
+			"expected background review deadline to be in the future, got %v",
+			orchestrator.deadline,
 		)
 	}
 }
@@ -1253,9 +1268,9 @@ func TestGitHubWebhookHandler_FailedReviewCanBeRetried(
 
 	handler.HandleWebhook(rec1, req1)
 
-	if rec1.Code != http.StatusInternalServerError {
+	if rec1.Code != http.StatusAccepted {
 		t.Fatalf(
-			"first request: expected 500, got %d",
+			"first request: expected 202, got %d",
 			rec1.Code,
 		)
 	}
@@ -1278,9 +1293,9 @@ func TestGitHubWebhookHandler_FailedReviewCanBeRetried(
 
 	handler.HandleWebhook(rec2, req2)
 
-	if rec2.Code != http.StatusInternalServerError {
+	if rec2.Code != http.StatusAccepted {
 		t.Fatalf(
-			"retry request: expected 500, got %d",
+			"retry request: expected 202, got %d",
 			rec2.Code,
 		)
 	}
@@ -1316,21 +1331,21 @@ func TestGitHubWebhookHandler_MBCommandGitHubFailureAllowsRetry(
 		"MorningBlossom",
 	)
 
-	req := createWebhookRequest(
+	req1 := createWebhookRequest(
 		http.MethodPost,
 		payload,
 		"issue_comment",
 		"delivery-command-github-failure",
 	)
 
-	rec := httptest.NewRecorder()
+	rec1 := httptest.NewRecorder()
 
-	handler.HandleWebhook(rec, req)
+	handler.HandleWebhook(rec1, req1)
 
-	if rec.Code != http.StatusInternalServerError {
+	if rec1.Code != http.StatusAccepted {
 		t.Fatalf(
-			"expected status 500, got %d",
-			rec.Code,
+			"first request: expected 202, got %d",
+			rec1.Code,
 		)
 	}
 
@@ -1338,6 +1353,45 @@ func TestGitHubWebhookHandler_MBCommandGitHubFailureAllowsRetry(
 		t.Fatalf(
 			"expected orchestrator not to be called, got %d",
 			orchestrator.calls,
+		)
+	}
+
+	if githubProvider.getPullRequestCalls != 1 {
+		t.Fatalf(
+			"expected first attempt to fetch GitHub PR once, got %d",
+			githubProvider.getPullRequestCalls,
+		)
+	}
+
+	req2 := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"issue_comment",
+		"delivery-command-github-failure",
+	)
+
+	rec2 := httptest.NewRecorder()
+
+	handler.HandleWebhook(rec2, req2)
+
+	if rec2.Code != http.StatusAccepted {
+		t.Fatalf(
+			"retry request: expected 202, got %d",
+			rec2.Code,
+		)
+	}
+
+	if orchestrator.calls != 0 {
+		t.Fatalf(
+			"expected orchestrator not to be called after retry, got %d",
+			orchestrator.calls,
+		)
+	}
+
+	if githubProvider.getPullRequestCalls != 2 {
+		t.Fatalf(
+			"expected retry to fetch GitHub PR again, got %d",
+			githubProvider.getPullRequestCalls,
 		)
 	}
 }
