@@ -521,13 +521,13 @@ func TestGitHubPublisher_Publish_AnalyzerFailureContainsRemediation(t *testing.T
 	p := NewGitHubPublisher(client)
 
 	request := review.ReviewRequest{
-		InstallationID: 456,
-		Organization: "MorningBlossom",
-		Repository: "example-repo",
-		PullRequestNumber: 42,
-		HeadSHA: "head-123",
+		InstallationID:      456,
+		Organization:        "MorningBlossom",
+		Repository:          "example-repo",
+		PullRequestNumber:   42,
+		HeadSHA:             "head-123",
 		ReviewPolicyVersion: "v1",
-		ReviewMode: "manual_full_pr",
+		ReviewMode:          "manual_full_pr",
 	}
 
 	result := review.ReviewResult{
@@ -535,7 +535,7 @@ func TestGitHubPublisher_Publish_AnalyzerFailureContainsRemediation(t *testing.T
 		AnalyzerSummary: []review.AnalyzerResult{
 			{
 				AnalyzerName: "gofmt",
-				Status: "failed",
+				Status:       "failed",
 				Diagnostics: []string{
 					"gofmt execution failed for main.go: executable file not found",
 				},

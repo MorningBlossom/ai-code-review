@@ -461,8 +461,8 @@ func TestReviewOrchestrator_PublishesWhenWorkspaceAnalyzerFails(t *testing.T) {
 		fn: func(ctx context.Context, ws workspace.Workspace) review.AnalyzerResult {
 			return review.AnalyzerResult{
 				AnalyzerName: "go-vet",
-				Status: "failed",
-				Diagnostics: []string{"go vet execution failed: go: command not found"},
+				Status:       "failed",
+				Diagnostics:  []string{"go vet execution failed: go: command not found"},
 			}
 		},
 	}
