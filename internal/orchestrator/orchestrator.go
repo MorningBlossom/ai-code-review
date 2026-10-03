@@ -298,13 +298,46 @@ func (o *ReviewOrchestrator) Review(
 		)
 	}
 
-	// Do not invoke the model when any analyzer failed. The analyzer result
-	// contains the diagnostics needed by the publisher to produce an actionable
-	// PR message.
+	// Analyzer failures must skip the model, but analyzer findings still need
+	// the same context validation as model findings before they are published.
+	// Otherwise an analyzer can emit a source-file line that is not present in
+	// the current PR diff and GitHub can reject the entire review with 422
+	// "Line could not be resolved".
 	if hasAnalyzerFailures(result) {
+		validatedFindings, err := o.validator.ValidateWithContext(
+			ctx,
+			request,
+			reviewContext,
+			result.Findings,
+		)
+		if err != nil {
+			log.Printf(
+				"orchestrator failed review_id=%s stage=validate_analyzer_findings error=%v",
+				request.ReviewID,
+				err,
+			)
+
+			return o.failResult(
+				result,
+				start,
+				fmt.Errorf("validate analyzer findings: %w", err),
+			)
+		}
+
+		result.Findings = validatedFindings
 		result.Status = "completed_with_analyzer_failures"
 		result.DurationMillis = time.Since(start).Milliseconds()
-		log.Printf("analyzer failures detected review_id=%s failures=%d", request.ReviewID, countAnalyzerFailures(result))
+
+		log.Printf(
+			"analyzer findings validated review_id=%s findings=%d",
+			request.ReviewID,
+			len(result.Findings),
+		)
+		log.Printf(
+			"analyzer failures detected review_id=%s failures=%d",
+			request.ReviewID,
+			countAnalyzerFailures(result),
+		)
 
 		if err := o.publisher.Publish(ctx, request, result); err != nil {
 			return o.failResult(result, start, fmt.Errorf("publish review: %w", err))

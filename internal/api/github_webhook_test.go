@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MorningBlossom/ai-code-review/internal/github"
 	"github.com/MorningBlossom/ai-code-review/internal/orchestrator"
@@ -122,6 +123,28 @@ func (f *failingWebhookTestOrchestrator) Review(
 	return review.ReviewResult{}, errors.New("orchestrator failure")
 }
 
+func newTestGithubWebhookHandler(
+	orchestrator orchestrator.Orchestrator,
+	githubProvider github.Provider,
+	webhookSecret string,
+	store *DeliveryStore,
+	organization string,
+) *GithubWebhookHandler {
+	handler := NewGithubWebhookHandler(
+		orchestrator,
+		githubProvider,
+		webhookSecret,
+		store,
+		organization,
+	)
+
+	handler.backgroundRunner = func(fn func()) {
+		fn()
+	}
+
+	return handler
+}
+
 func createWebhookRequest(
 	method string,
 	payload string,
@@ -157,6 +180,162 @@ func createWebhookRequest(
 	return req
 }
 
+type blockingWebhookTestOrchestrator struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingWebhookTestOrchestrator) Review(
+	_ context.Context,
+	_ review.ReviewRequest,
+) (review.ReviewResult, error) {
+	close(f.started)
+	<-f.release
+
+	return review.ReviewResult{Status: "completed"}, nil
+}
+
+func TestGitHubWebhookHandler_AcknowledgesBeforeReviewCompletes(t *testing.T) {
+	orchestrator := &blockingWebhookTestOrchestrator{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	handler := NewGithubWebhookHandler(
+		orchestrator,
+		&webhookTestGitHubProvider{},
+		testWebhookSecret,
+		NewDeliveryStore(),
+		"MorningBlossom",
+	)
+
+	payload := pullRequestPayload(
+		"opened",
+		false,
+		"base-123",
+		"head-456",
+	)
+
+	req := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"pull_request",
+		"delivery-async-001",
+	)
+
+	rec := httptest.NewRecorder()
+	handler.HandleWebhook(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusAccepted,
+			rec.Code,
+		)
+	}
+
+	select {
+	case <-orchestrator.started:
+	case <-time.After(time.Second):
+		t.Fatal("expected background review to start")
+	}
+
+	select {
+	case <-orchestrator.release:
+		t.Fatal("review completed before webhook acknowledgement test")
+	default:
+	}
+
+	close(orchestrator.release)
+}
+
+type contextCaptureWebhookOrchestrator struct {
+	ctxErr      error
+	hasDeadline bool
+	deadline    time.Time
+}
+
+func (f *contextCaptureWebhookOrchestrator) Review(
+	ctx context.Context,
+	_ review.ReviewRequest,
+) (review.ReviewResult, error) {
+	f.ctxErr = ctx.Err()
+
+	f.deadline, f.hasDeadline = ctx.Deadline()
+
+	return review.ReviewResult{Status: "completed"}, nil
+}
+
+func TestGitHubWebhookHandler_BackgroundReviewUsesIndependentContext(
+	t *testing.T,
+) {
+	orchestrator := &contextCaptureWebhookOrchestrator{}
+
+	handler := NewGithubWebhookHandler(
+		orchestrator,
+		&webhookTestGitHubProvider{},
+		testWebhookSecret,
+		NewDeliveryStore(),
+		"MorningBlossom",
+	)
+
+	var background func()
+
+	handler.backgroundRunner = func(fn func()) {
+		background = fn
+	}
+
+	payload := pullRequestPayload(
+		"opened",
+		false,
+		"base-123",
+		"head-456",
+	)
+
+	req := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"pull_request",
+		"delivery-independent-context",
+	)
+
+	rec := httptest.NewRecorder()
+
+	handler.HandleWebhook(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusAccepted,
+			rec.Code,
+		)
+	}
+
+	if background == nil {
+		t.Fatal("expected background review to be queued")
+	}
+
+	background()
+
+	if orchestrator.ctxErr != nil {
+		t.Fatalf(
+			"expected background review context to be active while Review was running, got %v",
+			orchestrator.ctxErr,
+		)
+	}
+
+	if !orchestrator.hasDeadline {
+		t.Fatal("expected background review context to have a deadline")
+	}
+
+	if !orchestrator.deadline.After(time.Now()) {
+		t.Fatalf(
+			"expected background review deadline to be in the future, got %v",
+			orchestrator.deadline,
+		)
+	}
+}
+
 func TestGitHubWebhookHandler_ReadyPROpenedTriggersReview(t *testing.T) {
 	payload := `{
 "action": "opened",
@@ -189,7 +368,7 @@ func TestGitHubWebhookHandler_ReadyPROpenedTriggersReview(t *testing.T) {
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -258,7 +437,7 @@ func TestGitHubWebhookHandler_DraftPROpenedDoesNotTriggerReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -306,7 +485,7 @@ func TestGitHubWebhookHandler_DraftPRSynchronizedDoesNotTriggerReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -354,7 +533,7 @@ func TestGitHubWebhookHandler_ReadyForReviewTriggersReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -409,7 +588,7 @@ func TestGitHubWebhookHandler_ReopenedReadyPRTriggersReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -457,7 +636,7 @@ func TestGitHubWebhookHandler_ReopenedDraftPRDoesNotTriggerReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -505,7 +684,7 @@ func TestGitHubWebhookHandler_SynchronizeDoesNotTriggerReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -563,7 +742,7 @@ func TestGitHubWebhookHandler_MBCommandTriggersFullPRReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		githubProvider,
 		testWebhookSecret,
@@ -641,7 +820,7 @@ func TestGitHubWebhookHandler_MBCommandIsCaseInsensitive(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		githubProvider,
 		testWebhookSecret,
@@ -691,7 +870,7 @@ func TestGitHubWebhookHandler_MBCommandTrimsWhitespace(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		githubProvider,
 		testWebhookSecret,
@@ -741,7 +920,7 @@ func TestGitHubWebhookHandler_OtherCommentDoesNotTriggerReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		githubProvider,
 		testWebhookSecret,
@@ -803,7 +982,7 @@ func TestGitHubWebhookHandler_MBCommandOnDraftPRDoesNotTriggerReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		githubProvider,
 		testWebhookSecret,
@@ -877,7 +1056,7 @@ func TestGitHubWebhookHandler_NonPRIssueCommentDoesNotTriggerReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		githubProvider,
 		testWebhookSecret,
@@ -940,7 +1119,7 @@ func TestGitHubWebhookHandler_MBCommandUsesLatestPullRequest(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		githubProvider,
 		testWebhookSecret,
@@ -995,7 +1174,7 @@ func TestGitHubWebhookHandler_DuplicateDeliveryDoesNotTriggerSecondReview(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -1070,7 +1249,7 @@ func TestGitHubWebhookHandler_FailedReviewCanBeRetried(
 
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -1089,9 +1268,9 @@ func TestGitHubWebhookHandler_FailedReviewCanBeRetried(
 
 	handler.HandleWebhook(rec1, req1)
 
-	if rec1.Code != http.StatusInternalServerError {
+	if rec1.Code != http.StatusAccepted {
 		t.Fatalf(
-			"first request: expected 500, got %d",
+			"first request: expected 202, got %d",
 			rec1.Code,
 		)
 	}
@@ -1114,9 +1293,9 @@ func TestGitHubWebhookHandler_FailedReviewCanBeRetried(
 
 	handler.HandleWebhook(rec2, req2)
 
-	if rec2.Code != http.StatusInternalServerError {
+	if rec2.Code != http.StatusAccepted {
 		t.Fatalf(
-			"retry request: expected 500, got %d",
+			"retry request: expected 202, got %d",
 			rec2.Code,
 		)
 	}
@@ -1144,7 +1323,7 @@ func TestGitHubWebhookHandler_MBCommandGitHubFailureAllowsRetry(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		githubProvider,
 		testWebhookSecret,
@@ -1152,21 +1331,21 @@ func TestGitHubWebhookHandler_MBCommandGitHubFailureAllowsRetry(
 		"MorningBlossom",
 	)
 
-	req := createWebhookRequest(
+	req1 := createWebhookRequest(
 		http.MethodPost,
 		payload,
 		"issue_comment",
 		"delivery-command-github-failure",
 	)
 
-	rec := httptest.NewRecorder()
+	rec1 := httptest.NewRecorder()
 
-	handler.HandleWebhook(rec, req)
+	handler.HandleWebhook(rec1, req1)
 
-	if rec.Code != http.StatusInternalServerError {
+	if rec1.Code != http.StatusAccepted {
 		t.Fatalf(
-			"expected status 500, got %d",
-			rec.Code,
+			"first request: expected 202, got %d",
+			rec1.Code,
 		)
 	}
 
@@ -1174,6 +1353,45 @@ func TestGitHubWebhookHandler_MBCommandGitHubFailureAllowsRetry(
 		t.Fatalf(
 			"expected orchestrator not to be called, got %d",
 			orchestrator.calls,
+		)
+	}
+
+	if githubProvider.getPullRequestCalls != 1 {
+		t.Fatalf(
+			"expected first attempt to fetch GitHub PR once, got %d",
+			githubProvider.getPullRequestCalls,
+		)
+	}
+
+	req2 := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"issue_comment",
+		"delivery-command-github-failure",
+	)
+
+	rec2 := httptest.NewRecorder()
+
+	handler.HandleWebhook(rec2, req2)
+
+	if rec2.Code != http.StatusAccepted {
+		t.Fatalf(
+			"retry request: expected 202, got %d",
+			rec2.Code,
+		)
+	}
+
+	if orchestrator.calls != 0 {
+		t.Fatalf(
+			"expected orchestrator not to be called after retry, got %d",
+			orchestrator.calls,
+		)
+	}
+
+	if githubProvider.getPullRequestCalls != 2 {
+		t.Fatalf(
+			"expected retry to fetch GitHub PR again, got %d",
+			githubProvider.getPullRequestCalls,
 		)
 	}
 }
@@ -1212,7 +1430,7 @@ func TestGitHubWebhookHandler_InvalidSignature(t *testing.T) {
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -1253,7 +1471,7 @@ func TestGitHubWebhookHandler_InvalidJSON(t *testing.T) {
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -1289,7 +1507,7 @@ func TestGitHubWebhookHandler_NonPullRequestEvent(t *testing.T) {
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -1330,7 +1548,7 @@ func TestGitHubWebhookHandler_UnsupportedPullRequestAction(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -1375,7 +1593,7 @@ func TestGitHubWebhookHandler_MethodNotAllowed(t *testing.T) {
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -1412,7 +1630,7 @@ func TestGitHubWebhookHandler_RequestBodyTooLarge(t *testing.T) {
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
@@ -1481,7 +1699,7 @@ func TestGitHubWebhookHandler_RejectsUnauthorizedOrganization(
 	orchestrator := &webhookTestOrchestrator{}
 	deliveryStore := NewDeliveryStore()
 
-	handler := NewGithubWebhookHandler(
+	handler := newTestGithubWebhookHandler(
 		orchestrator,
 		&webhookTestGitHubProvider{},
 		testWebhookSecret,
