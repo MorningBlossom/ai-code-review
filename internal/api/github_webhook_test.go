@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MorningBlossom/ai-code-review/internal/github"
 	"github.com/MorningBlossom/ai-code-review/internal/orchestrator"
@@ -177,6 +178,75 @@ func createWebhookRequest(
 	)
 
 	return req
+}
+
+type blockingWebhookTestOrchestrator struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingWebhookTestOrchestrator) Review(
+	_ context.Context,
+	_ review.ReviewRequest,
+) (review.ReviewResult, error) {
+	close(f.started)
+	<-f.release
+
+	return review.ReviewResult{Status: "completed"}, nil
+}
+
+func TestGitHubWebhookHandler_AcknowledgesBeforeReviewCompletes(t *testing.T) {
+	orchestrator := &blockingWebhookTestOrchestrator{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	handler := NewGithubWebhookHandler(
+		orchestrator,
+		&webhookTestGitHubProvider{},
+		testWebhookSecret,
+		NewDeliveryStore(),
+		"MorningBlossom",
+	)
+
+	payload := pullRequestPayload(
+		"opened",
+		false,
+		"base-123",
+		"head-456",
+	)
+
+	req := createWebhookRequest(
+		http.MethodPost,
+		payload,
+		"pull_request",
+		"delivery-async-001",
+	)
+
+	rec := httptest.NewRecorder()
+	handler.HandleWebhook(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf(
+			"expected status %d, got %d",
+			http.StatusAccepted,
+			rec.Code,
+		)
+	}
+
+	select {
+	case <-orchestrator.started:
+	case <-time.After(time.Second):
+		t.Fatal("expected background review to start")
+	}
+
+	select {
+	case <-orchestrator.release:
+		t.Fatal("review completed before webhook acknowledgement test")
+	default:
+	}
+
+	close(orchestrator.release)
 }
 
 func TestGitHubWebhookHandler_ReadyPROpenedTriggersReview(t *testing.T) {
