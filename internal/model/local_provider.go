@@ -24,7 +24,7 @@ func NewLocalProvider(
 	timeout := time.Duration(config.TimeoutSeconds) * time.Second
 
 	if timeout <= 0 {
-		timeout = 120 * time.Second
+		timeout = 10 * time.Minute
 	}
 
 	return &LocalProvider{

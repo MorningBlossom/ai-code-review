@@ -34,7 +34,7 @@ func Load() Config {
 		AppEnv:               os.Getenv("APP_ENV"),
 		ModelTimeoutSeconds: getIntEnv(
 			"MODEL_TIMEOUT_SECONDS",
-			120,
+			600,
 		),
 		APIToken: os.Getenv("API_TOKEN"),
 	}
